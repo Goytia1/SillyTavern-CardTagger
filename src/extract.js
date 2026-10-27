@@ -165,6 +165,56 @@ export function isShallowCharacter(character) {
 }
 
 /**
+ * 找出与指定角色同名的其他角色（按显示名匹配，排除自己）。
+ *
+ * 用于「同名标签一键同步」：一个角色库里有好几张同名卡很常见
+ * （不同作者/版本），AI 读一张就能把标签复用给其余，省 token。
+ *
+ * TauriTavern 的浅层数据也带 name 字段，所以这条检测在浅层环境下依然可用。
+ *
+ * @param {object} context getContext()
+ * @param {string} name 显示名
+ * @param {string} [excludeAvatar] 排除掉自己的 avatar
+ * @returns {Array<{ avatar: string, name: string }>}
+ */
+export function findSameNameCharacters(context, name, excludeAvatar) {
+    const target = String(name ?? '').trim();
+    if (!target) return [];
+
+    const list = Array.isArray(context?.characters) ? context.characters : [];
+    const seen = new Set();
+
+    return list
+        .map(c => ({ avatar: String(c?.avatar ?? ''), name: getCharacterDisplayName(c) }))
+        .filter(c => {
+            if (!c.avatar || c.name !== target) return false;
+            if (excludeAvatar && c.avatar === excludeAvatar) return false;
+            if (seen.has(c.avatar)) return false;
+            seen.add(c.avatar);
+            return true;
+        });
+}
+
+/**
+ * 统计一组角色里「同名」的分组数（≥2 人同名才算一组）。
+ * @param {Array<{ name: string }>} jobs
+ * @returns {number}
+ */
+export function countSameNameGroups(jobs) {
+    const counts = new Map();
+    for (const job of jobs ?? []) {
+        const name = String(job?.name ?? '').trim();
+        if (!name) continue;
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    let groups = 0;
+    for (const n of counts.values()) {
+        if (n >= 2) groups++;
+    }
+    return groups;
+}
+
+/**
  * 角色显示名（优先卡片名，回落文件名）。
  * @param {object} character
  * @returns {string}
