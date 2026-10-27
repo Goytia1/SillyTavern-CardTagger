@@ -201,17 +201,80 @@ export function findSameNameCharacters(context, name, excludeAvatar) {
  * @returns {number}
  */
 export function countSameNameGroups(jobs) {
-    const counts = new Map();
-    for (const job of jobs ?? []) {
-        const name = String(job?.name ?? '').trim();
+    return sameNameGroups(jobs).length;
+}
+
+/**
+ * 按显示名分组，只返回成员 ≥2 的组（即「有多张重复卡」的角色组）。
+ *
+ * @param {Array<{ name: string }>} items 带 name 的对象数组（character 或 job 均可）
+ * @returns {Array<{ name: string, members: Array<{ name: string }> }>}
+ */
+export function sameNameGroups(items) {
+    const byName = new Map();
+    for (const item of items ?? []) {
+        const name = getCharacterDisplayName(item).trim();
         if (!name) continue;
-        counts.set(name, (counts.get(name) ?? 0) + 1);
+        if (!byName.has(name)) byName.set(name, []);
+        byName.get(name).push(item);
     }
-    let groups = 0;
-    for (const n of counts.values()) {
-        if (n >= 2) groups++;
+    return [...byName.entries()]
+        .filter(([, members]) => members.length >= 2)
+        .map(([name, members]) => ({ name, members }));
+}
+
+/**
+ * 归一化时间戳为毫秒。ST 老版本用秒、新版本用毫秒，容错处理。
+ * @param {number|string} value
+ * @returns {number} 无法解析时返回 0
+ */
+function toMillis(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n > 1e12 ? n : n * 1000;
+}
+
+/**
+ * 取一组同名角色里「最新」的那个。
+ *
+ * 「最新」按 date_added（角色导入/复制进库的时间）判定——后导入的版本
+ * 通常就是用户想用的新版本。官方 ST（charStat.ctimeMs）和 TauriTavern
+ * （Character.date_added，浅层数据也保留）都有这个字段。
+ *
+ * 兜底顺序：date_added → create_date → avatar 文件名倒序。
+ *
+ * @param {Array<object>} members 同名角色组
+ * @returns {object|undefined}
+ */
+export function pickNewest(members) {
+    if (!Array.isArray(members) || !members.length) return undefined;
+    if (members.length === 1) return members[0];
+
+    const score = (c) => {
+        // character.date_added（ST/TauriTavern 都有）或 job.dateAdded（列表阶段存底）
+        const added = toMillis(c?.date_added ?? c?.dateAdded);
+        if (added) return added;
+        const created = Date.parse(String(c?.create_date ?? c?.createDate ?? ''));
+        if (Number.isFinite(created)) return created;
+        return 0;
+    };
+
+    let best = members[0];
+    let bestScore = score(best);
+    for (let i = 1; i < members.length; i++) {
+        const s = score(members[i]);
+        if (s > bestScore) {
+            best = members[i];
+            bestScore = s;
+        }
     }
-    return groups;
+
+    // 全都取不到时间：保持库内顺序的最后一个。
+    // ST 的角色列表基本按导入序排列，最后一个≈最新——这比从
+    // 文件名猜版本号靠谱得多（"谢嬴.png" vs "谢嬴-v2.png" 按字符
+    // 排序反而是前者大，猜不出所以然）
+    if (!bestScore) best = members[members.length - 1];
+    return best;
 }
 
 /**
