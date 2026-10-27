@@ -18,7 +18,7 @@ import {
     SYSTEM_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
-import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent, isShallowCharacter } from './src/extract.js';
 import { fetchFullCharacter } from './src/cardfile.js';
 import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText, isEmptyTagResult } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
@@ -367,8 +367,10 @@ async function runAnalysis() {
 
         // TauriTavern 等客户端的角色列表只返回浅层数据（描述/性格/场景全空），
         // 直接抽只能得到角色名，模型必然交白卷。这时补拉一次完整卡片。
+        // 判据用 isShallowCharacter：显式 shallow 标记，或重载荷字段全空。
+        // 注意 creator_notes 不算内容字段——浅层数据里它是保留的（v1.3.x 的坑）。
         let source = character;
-        if (!hasCardContent(source)) {
+        if (isShallowCharacter(source)) {
             const full = await fetchFullCharacter({
                 avatar: character?.avatar,
                 getRequestHeaders: () => (typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {}),
@@ -498,7 +500,7 @@ async function retryFailed() {
 
         // 同 runAnalysis：浅层数据时补拉完整卡片
         let source = character;
-        if (!hasCardContent(source)) {
+        if (isShallowCharacter(source)) {
             const full = await fetchFullCharacter({
                 avatar: character?.avatar,
                 getRequestHeaders: () => (typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {}),
@@ -859,6 +861,44 @@ function buildChips(job, container) {
     return frag;
 }
 
+/**
+ * 「看原文」按钮。成功行也给入口——用户要能随时核对这次到底给模型
+ * 看了什么、模型又回了什么，不只失败时才给看。
+ * @param {object} job
+ * @returns {HTMLButtonElement|null}
+ */
+function buildRawLink(job) {
+    if (!job.raw && !job.sentPreview) return null;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ct-raw-link';
+    btn.textContent = '看原文';
+    btn.title = '查看模型的原始返回，以及本次实际发给模型的内容';
+    btn.addEventListener('click', () => showRawDialog(job));
+    return btn;
+}
+
+/**
+ * 内容来源小标记。手机上「只能出一个泛泛的标签」这类问题，这一行直接回答
+ * 「完整卡片到底拿到没有」：完整卡片·接口 / 完整卡片·文件 / 没拉到。
+ * @param {object} job
+ * @returns {HTMLDivElement|null}
+ */
+function buildSourceNote(job) {
+    if (!job.fullFetch) return null;
+    const note = document.createElement('div');
+    if (job.fullFetch === 'api' || job.fullFetch === 'file') {
+        note.className = 'ct-source-note ct-source-ok';
+        note.textContent = job.fullFetch === 'api' ? '完整卡片·接口' : '完整卡片·文件';
+        note.title = '客户端只返回了浅层数据，已自动补拉完整卡片';
+    } else {
+        note.className = 'ct-source-note ct-source-failed';
+        note.textContent = '⚠ 完整卡片没拉到';
+        note.title = '客户端只返回了浅层数据，补拉也失败了——模型看到的可能只有角色名和备注';
+    }
+    return note;
+}
+
 function buildStatus(job) {
     const el = document.createElement('div');
 
@@ -878,14 +918,10 @@ function buildStatus(job) {
 
         // 有原文就一定给看的入口：审核拦截、格式跑偏、被截断，
         // 光看这句提示是猜不出来的，必须让用户亲眼看到模型说了什么
-        if (job.raw) {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'ct-raw-link';
-            btn.textContent = '看原文';
-            btn.addEventListener('click', () => showRawDialog(job));
-            el.appendChild(btn);
-        }
+        const rawLink = buildRawLink(job);
+        if (rawLink) el.appendChild(rawLink);
+        const note = buildSourceNote(job);
+        if (note) el.appendChild(note);
         return el;
     }
 
@@ -893,6 +929,11 @@ function buildStatus(job) {
     const count = activeTags(job).length;
     el.textContent = job.salvaged ? `✓ ${count} 个（从原文抢救）` : `✓ ${count} 个标签`;
     if (job.reason) el.title = job.reason;
+    // 成功行同样能看原文 + 内容来源，方便随时抽检
+    const okRawLink = buildRawLink(job);
+    if (okRawLink) el.appendChild(okRawLink);
+    const okNote = buildSourceNote(job);
+    if (okNote) el.appendChild(okNote);
     return el;
 }
 
@@ -1099,10 +1140,25 @@ async function ensurePanel() {
         table: $('ct_result_table'),
         resultBody: $('ct_result_body'),
         footerStats: $('ct_footer_stats'),
+        version: $('ct_version'),
         applyLocal: $('ct_apply_local'),
         applyCard: $('ct_apply_card'),
         exportBtn: $('ct_export'),
     };
+
+    // 版本号直接从 manifest 读，显示在页脚。
+    // 手机上排查「改了没生效」时，这一行是唯一可靠的凭据——
+    // 如果显示的版本比预期旧，说明扩展没更新成功（TauriTavern 需要走
+    // 扩展管理里的「更新」，重复点安装可能不会覆盖旧文件）。
+    fetch(new URL('./manifest.json', import.meta.url))
+        .then(res => (res.ok ? res.json() : null))
+        .then(manifest => {
+            if (manifest?.version && state.ui.version) {
+                state.ui.version.textContent = `v${manifest.version}`;
+                state.ui.version.title = `CardTagger ${manifest.version}`;
+            }
+        })
+        .catch(() => { /* 读不到就不显示，不影响功能 */ });
 
     // ---- 事件绑定 ----
     state.ui.close.addEventListener('click', () => { state.ui.root.hidden = true; });
