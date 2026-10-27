@@ -4,7 +4,7 @@
  */
 
 import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName } from './src/extract.js';
-import { parseTagResult, stripCodeFence, normalizeResult, AbortedError } from './src/api.js';
+import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError } from './src/api.js';
 import { assignLocalTags, findLocalTag, ensureLocalTag } from './src/writer.js';
 import { DEFAULT_FIELD_LIMITS, DEFAULT_SELECTED_FIELDS, DEFAULT_TAG_POOL } from './src/defaults.js';
 
@@ -138,7 +138,22 @@ check('不同角色互不影响', fakeContext.tagMap['ceo.png'].length === 3 && 
 assignLocalTags(fakeContext, 'ceo.png', ['病娇'], { replace: true });
 check('replace 模式会清空旧标签', fakeContext.tagMap['ceo.png'].length === 1);
 
-console.log('\n=== 6. 边界情况 ===');
+console.log('\n=== 6. 模型列表解析（各平台 /models 返回格式） ===');
+check('OpenAI 标准 {data:[{id}]}', parseModelList('{"object":"list","data":[{"id":"gpt-4o","object":"model"}]}').join() === 'gpt-4o');
+check('DeepSeek 格式', parseModelList('{"data":[{"id":"deepseek-chat"},{"id":"deepseek-reasoner"}]}').join() === 'deepseek-chat,deepseek-reasoner');
+check('data 是纯字符串数组', parseModelList('{"data":["a-1","b-2"]}').length === 2);
+check('Gemini 的 models/ 前缀被剥掉', parseModelList('{"models":[{"name":"models/gemini-2.0-flash"}]}')[0] === 'gemini-2.0-flash');
+check('map 形态 {模型名:{详情}}', parseModelList('{"data":{"qwen-max":{"x":1},"qwen-turbo":{"y":2}}}').length === 2);
+check('顶层就是数组', parseModelList('[{"id":"m1"},{"id":"m2"}]').length === 2);
+check('容器键不会被当成模型名',
+    !parseModelList('{"object":"list","data":{"list":["real-model"],"count":9}}').includes('list')
+    && !parseModelList('{"object":"list","data":{"list":["real-model"],"count":9}}').includes('count'));
+check('去重后排序', parseModelList('{"data":[{"id":"b"},{"id":"a"},{"id":"a"}]}').join() === 'a,b');
+check('非 JSON 返回空数组不炸', parseModelList('<html>502 Bad Gateway</html>').length === 0);
+check('空响应不炸', parseModelList('').length === 0);
+check('null 字段不炸', parseModelList('{"data":[null,{"id":"x"},{}]}').join() === 'x');
+
+console.log('\n=== 7. 边界情况 ===');
 check('空对象角色不炸', buildCardContent({}, opts).isEmpty);
 check('null 角色不炸', buildCardContent(null, opts).isEmpty);
 check('无 avatar 时回落', getCharacterDisplayName({}) === '(未命名)');

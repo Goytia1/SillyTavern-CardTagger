@@ -307,3 +307,128 @@ export async function runPool(tasks, limit = 4, onProgress, signal) {
     await Promise.all(workers);
     return results;
 }
+
+/**
+ * 从平台拉取可用模型列表（OpenAI 兼容的 `/models` 端点）。
+ *
+ * 各家的返回格式五花八门，解析器要能同时吃下：
+ *   - `{data: [{id: 'x'}]}`            OpenAI / DeepSeek / 硅基流动
+ *   - `{data: ['x', 'y']}`             某些中转站
+ *   - `{models: [{name: 'models/x'}]}` Gemini（name 带 models/ 前缀）
+ *   - `{models: {x: {...}}}`           key 即模型名
+ *   - 顶层就是数组
+ *
+ * @param {object} params
+ * @param {string} params.apiUrl 用户填的 API 地址（可带 /v1，也可不带）
+ * @param {string} params.apiKey
+ * @param {string} [params.extraHeaders] JSON 字符串
+ * @returns {Promise<string[]>} 去重排序后的模型 id
+ */
+export async function fetchModelList({ apiUrl, apiKey, extraHeaders = '' }) {
+    const base = String(apiUrl ?? '').trim().replace(/\/+$/, '');
+    if (!base) throw new Error('请先填 API 地址');
+    if (!apiKey) throw new Error('请先填 API Key');
+
+    const headers = { Accept: 'application/json' };
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    if (extraHeaders) {
+        try {
+            Object.assign(headers, JSON.parse(extraHeaders));
+        } catch {
+            // 请求头还没填对就别阻塞拉模型，让真正的调用去报错
+        }
+    }
+
+    // 有人填 https://api.deepseek.com，有人填 https://api.deepseek.com/v1，
+    // 两种情况都得能拉到，所以按需补 /v1 再试一次。
+    const candidates = [`${base}/models`];
+    if (!/\/v\d+$/.test(base)) candidates.push(`${base}/v1/models`);
+
+    const failures = [];
+    for (const url of candidates) {
+        try {
+            const res = await fetch(url, { method: 'GET', headers });
+            const text = await res.text();
+
+            if (!res.ok) {
+                // 401/403 基本就是 key 的问题，直接把服务端的话带回去给用户看
+                failures.push(`HTTP ${res.status} ${summarizeError(text)}`);
+                continue;
+            }
+
+            const models = parseModelList(text);
+            if (models.length) return models;
+            failures.push('接口返回 200 但里面没有模型');
+        } catch (err) {
+            failures.push(String(err?.message ?? err));
+        }
+    }
+
+    throw new Error(failures[0] ?? '拉取失败');
+}
+
+/** 把服务端的错误响应压成一句人话，避免一坨 HTML 糊在 UI 上 */
+function summarizeError(text) {
+    if (!text) return '';
+    try {
+        const json = JSON.parse(text);
+        const msg = json?.error?.message ?? json?.message ?? json?.error;
+        if (typeof msg === 'string' && msg.trim()) return msg.trim().slice(0, 160);
+    } catch {
+        // 不是 JSON，走下面
+    }
+    return text.replace(/\s+/g, ' ').trim().slice(0, 160);
+}
+
+/** @param {string} text @returns {string[]} */
+export function parseModelList(text) {
+    let json;
+    try {
+        json = JSON.parse(text);
+    } catch {
+        return [];
+    }
+    if (!json || typeof json !== 'object') return [];
+
+    const ids = new Set();
+    const add = (v) => {
+        const s = typeof v === 'string' ? v.trim() : '';
+        // Gemini 的 name 长这样：models/gemini-2.0-flash
+        if (s) ids.add(s.replace(/^models\//, ''));
+    };
+
+    const walkArray = (arr) => {
+        for (const item of arr) {
+            if (!item) continue;
+            if (typeof item === 'string') {
+                add(item);
+            } else if (typeof item === 'object') {
+                add(item.id ?? item.model ?? item.model_name ?? item.name ?? item.modelId);
+            }
+        }
+    };
+
+    // 少数中转把模型列表包成 { "gpt-4": {...} } 的 map，这时 key 才是模型名。
+    // 但要挡住 list / data 这种容器键，否则会往下拉里塞垃圾项。
+    const WRAPPER_KEYS = new Set([
+        'object', 'list', 'data', 'models', 'model', 'model_list', 'code', 'msg',
+        'message', 'status', 'success', 'error', 'errors', 'total', 'count',
+        'page', 'limit', 'has_more', 'type', 'created', 'owned_by', 'id',
+    ]);
+    const walkMap = (obj) => {
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+        for (const key of Object.keys(obj)) {
+            if (!WRAPPER_KEYS.has(key)) add(key);
+        }
+    };
+
+    if (Array.isArray(json)) walkArray(json);
+    if (Array.isArray(json.data)) walkArray(json.data);
+    else walkMap(json.data);
+    if (Array.isArray(json.models)) walkArray(json.models);
+    else walkMap(json.models);
+    if (Array.isArray(json.model_list)) walkArray(json.model_list);
+    if (Array.isArray(json.list)) walkArray(json.list);
+
+    return [...ids].sort();
+}

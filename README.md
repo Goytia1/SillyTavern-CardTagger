@@ -72,7 +72,11 @@ https://github.com/Goytia1/SillyTavern-CardTagger
 - **独立 API（推荐）**：填 Base URL / Key / 模型。推荐用便宜的小模型，几百张卡跑下来成本极低。支持任意 OpenAI 兼容接口（DeepSeek、通义、GPT-4o-mini、本地 Ollama/vLLM 都行），也支持中转站的额外请求头/请求体。
 - **复用 ST 当前连接**：零配置，但串行且贵。角色多的时候别用。
 
-填完记得点**测试连接**。
+填完点模型名旁边的 **「拉取模型」**，输入框就变成可下拉的 —— 直接选平台上的模型，不用手打。改完 API 地址或 Key 也会自动拉一次；点「测试连接」跑通后同样会自动补上列表。
+
+模型名那一栏**仍然可以手打**（本地 Ollama、vLLM 或某些中转的私有模型名不在 `/models` 列表里）。
+
+各平台的 `/models` 返回格式不太一样，解析器兼容 OpenAI / DeepSeek 的 `{data:[{id}]}`、纯字符串数组、Gemini 的 `{models:[{name:"models/..."}]}`，以及把模型名当 key 的 map 形态。
 
 ### 标签池
 

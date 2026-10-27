@@ -565,6 +565,43 @@
     font-size: 0.9em;
 }
 
+/* ---------- 模型名：输入框 + 拉取按钮 ---------- */
+.ct-inline-input {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.ct-inline-input .text_pole {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.ct-fetch-models {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.ct-fetch-models:disabled {
+    opacity: 0.6;
+    cursor: progress;
+}
+
+.ct-model-hint {
+    margin-bottom: 0;
+}
+
+.ct-model-hint-fail {
+    color: #e2807d;
+    opacity: 0.95;
+}
+
+/* datalist 的弹层不吃 ST 主题变量，深色底下不设会变成白底黑字看不清 */
+.ct-view-body datalist option {
+    background: #24242c;
+    color: #e8e8e8;
+}
+
 /* ---------- 小屏（手机端 ST） ---------- */
 @media (max-width: 720px) {
     .ct-panel {

@@ -19,7 +19,7 @@ import {
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
 import { buildCardContent, getExistingTags, getCharacterDisplayName } from './src/extract.js';
-import { requestCardTags, runPool, AbortedError, normalizeResult } from './src/api.js';
+import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
 
 const context = SillyTavern.getContext();
@@ -957,6 +957,84 @@ function bindSettingsControls(host) {
     bindText('ct_extra_headers', 'extra_headers');
     bindText('ct_extra_body', 'extra_body');
 
+    // ---- 模型列表 ----
+    const modelList = $('#ct_model_list');
+    const modelHint = $('#ct_model_hint');
+    const fetchBtn = $('#ct_fetch_models');
+
+    const applyModelList = (models) => {
+        modelList.innerHTML = '';
+        for (const name of models) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            modelList.appendChild(opt);
+        }
+        modelHint.className = 'ct-hint ct-model-hint';
+        modelHint.textContent = models.length
+            ? `已拉到 ${models.length} 个模型，点输入框就能下拉选；也可以继续手打`
+            : '';
+        return models.length;
+    };
+
+    let inflightModels = null;
+    const pullModels = async ({ quiet = false } = {}) => {
+        if (inflightModels) return inflightModels;
+
+        if (!String(s.api_url ?? '').trim()) {
+            modelHint.className = 'ct-hint ct-model-hint ct-model-hint-fail';
+            modelHint.textContent = '先填 API 地址';
+            return 0;
+        }
+
+        fetchBtn.disabled = true;
+        fetchBtn.value = '拉取中…';
+        modelHint.className = 'ct-hint ct-model-hint';
+        modelHint.textContent = '';
+
+        inflightModels = (async () => {
+            try {
+                const models = await fetchModelList({
+                    apiUrl: s.api_url,
+                    apiKey: s.api_key,
+                    extraHeaders: s.extra_headers,
+                });
+                const count = applyModelList(models);
+                if (!quiet) {
+                    if (count) toastr.success(`拉到 ${count} 个可用模型`, 'CardTagger');
+                    else toastr.info('接口没返回任何模型', 'CardTagger');
+                }
+                return count;
+            } catch (err) {
+                const msg = String(err?.message ?? err).slice(0, 200);
+                modelHint.className = 'ct-hint ct-model-hint ct-model-hint-fail';
+                modelHint.textContent = `✗ ${msg}`;
+                if (!quiet) toastr.error(`拉取模型失败：${msg}`, 'CardTagger', { timeOut: 8000 });
+                return 0;
+            } finally {
+                fetchBtn.disabled = false;
+                fetchBtn.value = '拉取模型';
+                inflightModels = null;
+            }
+        })();
+
+        return inflightModels;
+    };
+
+    fetchBtn.addEventListener('click', () => pullModels());
+
+    // URL / Key 改完之后自动拉一次。挂 change（失焦）而不是 input，
+    // 否则每敲一个字母就打一次接口。
+    let autoPullKey = '';
+    const maybeAutoPull = () => {
+        if (s.ai_source !== 'custom') return;
+        const key = `${s.api_url ?? ''}|${s.api_key ?? ''}|${s.extra_headers ?? ''}`;
+        if (!key.replace(/\|/g, '').trim() || key === autoPullKey) return;
+        autoPullKey = key;
+        pullModels({ quiet: true });
+    };
+    $('#ct_api_url').addEventListener('change', maybeAutoPull);
+    $('#ct_api_key').addEventListener('change', maybeAutoPull);
+
     const bindNumber = (id, key) => {
         const el = $(`#${id}`);
         el.value = s[key];
@@ -987,6 +1065,9 @@ function bindSettingsControls(host) {
             });
             resultEl.className = 'ct-test-result ct-test-ok';
             resultEl.textContent = `✓ 通了，耗时 ${Date.now() - startedAt}ms`;
+
+            // 连接通了就把模型列表也拉回来，省得用户再点一次
+            if (s.ai_source === 'custom') pullModels({ quiet: true });
         } catch (err) {
             resultEl.className = 'ct-test-result ct-test-fail';
             resultEl.textContent = `✗ ${String(err?.message ?? err).slice(0, 120)}`;

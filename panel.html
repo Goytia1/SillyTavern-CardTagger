@@ -129,7 +129,14 @@
                             <input type="password" id="ct_api_key" class="text_pole" placeholder="sk-..." autocomplete="off" />
 
                             <label for="ct_model">模型名</label>
-                            <input type="text" id="ct_model" class="text_pole" placeholder="deepseek-chat" autocomplete="off" />
+                            <div class="ct-inline-input">
+                                <input type="text" id="ct_model" class="text_pole" list="ct_model_list"
+                                    placeholder="deepseek-chat" autocomplete="off" />
+                                <input type="button" id="ct_fetch_models" class="menu_button ct-fetch-models"
+                                    value="拉取模型" title="从该 API 拉取可用模型列表" />
+                            </div>
+                            <datalist id="ct_model_list"></datalist>
+                            <div id="ct_model_hint" class="ct-hint ct-model-hint"></div>
 
                             <div class="ct-row">
                                 <div>
