@@ -408,6 +408,31 @@
     opacity: 0.78;
 }
 
+/* 版本号：排查「手机上改没生效」的唯一凭据 */
+.ct-version {
+    font-size: 0.75rem;
+    opacity: 0.5;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+/* 内容来源标记（完整卡片补拉结果） */
+.ct-source-note {
+    font-size: 0.72rem;
+    opacity: 0.85;
+    margin-top: 3px;
+    white-space: nowrap;
+}
+
+.ct-source-ok {
+    color: #86c58a;
+    opacity: 0.7;
+}
+
+.ct-source-failed {
+    color: #e2807d;
+}
+
 .ct-footer-actions {
     display: flex;
     gap: 8px;
