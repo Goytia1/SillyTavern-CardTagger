@@ -15,6 +15,19 @@ export class AbortedError extends Error {
 }
 
 /**
+ * 模型回了东西但没能解析出标签。
+ * 带着原文，UI 才能告诉用户「模型到底说了什么」——
+ * 常见是审核拦截、破限失败、或者 JSON 被 max_tokens 截断。
+ */
+export class TagParseError extends Error {
+    constructor(message, raw = '') {
+        super(message);
+        this.name = 'TagParseError';
+        this.raw = typeof raw === 'string' ? raw : String(raw ?? '');
+    }
+}
+
+/**
  * 把 LLM 返回的文本里可能包裹的 ```json 代码块剥掉。
  * @param {string} raw
  * @returns {string}
@@ -41,14 +54,20 @@ export function stripCodeFence(raw) {
 }
 
 /**
- * 解析 AI 输出为 { pick, newTags, reason }。
+ * 解析 AI 输出为 { pick, newTags, reason, raw }。
  * 容忍字段名不一致（有些模型会写成 newTags / tags / new）。
+ *
+ * 解析失败时**必须保留 raw**：模型很可能返回了自然语言（被内容审核拦下、
+ * 破限失败、或者压根没按 JSON 格式答），这时候原文是唯一能定位问题的线索，
+ * 丢掉它就只剩一句「模型没给出任何标签」，用户和我都无从下手。
+ *
  * @param {string} raw
- * @returns {{ pick: string[], newTags: string[], reason: string }}
+ * @returns {{ pick: string[], newTags: string[], reason: string, raw: string }}
  */
 export function parseTagResult(raw) {
-    const fallback = { pick: [], newTags: [], reason: '' };
-    const cleaned = stripCodeFence(raw);
+    const text = typeof raw === 'string' ? raw : '';
+    const fallback = { pick: [], newTags: [], reason: '', raw: text };
+    const cleaned = stripCodeFence(text);
     if (!cleaned) return fallback;
 
     let obj;
@@ -71,7 +90,32 @@ export function parseTagResult(raw) {
         pick: toStringArray(obj.pick ?? obj.tags ?? obj.existing ?? []),
         newTags: toStringArray(obj.new_tags ?? obj.newTags ?? obj.new ?? []),
         reason: typeof obj.reason === 'string' ? obj.reason.trim() : '',
+        raw: text,
     };
+}
+
+/**
+ * 从模型的自然语言回复里尽量抢救出标签。
+ *
+ * 破限/审核被拦时模型不会答 JSON，而是回一段「抱歉，我无法…」之类的话；
+ * 也有模型会直接把标签写在散文里。这里用词表去正文里做子串匹配，
+ * 能捞回几个是几个 —— 总比整张卡判失败好。
+ *
+ * @param {string} raw
+ * @param {string[]} pool 标签池
+ * @returns {string[]}
+ */
+export function salvageTagsFromText(raw, pool) {
+    const text = String(raw ?? '');
+    if (!text || !Array.isArray(pool) || !pool.length) return [];
+    const hits = [];
+    for (const tag of pool) {
+        const t = String(tag).trim();
+        // 单字标签误命中率太高，跳过
+        if (!t || t.length < 2) continue;
+        if (text.includes(t) && !hits.includes(t)) hits.push(t);
+    }
+    return hits;
 }
 
 /**
@@ -200,7 +244,8 @@ async function callSillyTavernApi({ systemPrompt, userPrompt, context }) {
  * @param {object} params.context SillyTavern.getContext()
  * @param {AbortSignal} [params.signal]
  * @param {number} [params.retryTimes]
- * @returns {Promise<{ pick: string[], newTags: string[], reason: string }>}
+ * @returns {Promise<{ pick: string[], newTags: string[], reason: string, raw: string }>>
+ *          raw 是模型返回的原文，解析失败时靠它定位问题（拒答、格式跑偏等）
  */
 export async function requestCardTags({
     systemPrompt,
@@ -223,9 +268,10 @@ export async function requestCardTags({
             if (signal?.aborted) throw new AbortedError();
 
             const parsed = parseTagResult(raw);
-            // 空结果算失败，值得重试一次
+            // 空结果算失败，值得重试一次；但原文要一路带着，别丢
             if (!parsed.pick.length && !parsed.newTags.length && attempt < retryTimes) {
-                throw new Error('模型未返回有效标签');
+                lastError = new TagParseError('模型未返回有效标签', raw);
+                throw lastError;
             }
             return parsed;
         } catch (err) {
@@ -352,19 +398,67 @@ export async function fetchModelList({ apiUrl, apiKey, extraHeaders = '' }) {
 
             if (!res.ok) {
                 // 401/403 基本就是 key 的问题，直接把服务端的话带回去给用户看
-                failures.push(`HTTP ${res.status} ${summarizeError(text)}`);
+                failures.push(describeHttpFailure(res.status, url, text));
                 continue;
             }
 
             const models = parseModelList(text);
             if (models.length) return models;
-            failures.push('接口返回 200 但里面没有模型');
+            failures.push(`${url} 返回 200 但解析不出模型列表`);
         } catch (err) {
-            failures.push(String(err?.message ?? err));
+            failures.push(describeNetworkFailure(err, url));
         }
     }
 
-    throw new Error(failures[0] ?? '拉取失败');
+    throw new Error(failures.join('；') || '拉取失败');
+}
+
+/**
+ * HTTP 层失败（有状态码）转成能直接照做的话。
+ * @param {number} status
+ * @param {string} url
+ * @param {string} body 服务端返回的原文
+ * @returns {string}
+ */
+function describeHttpFailure(status, url, body) {
+    const detail = summarizeError(body);
+    switch (status) {
+        case 401:
+        case 403:
+            return `${url} → ${status}，Key 无效或没权限（${detail}）`;
+        case 404:
+            return `${url} → 404，这个平台可能没有 /models 端点，请直接手打模型名`;
+        case 429:
+            return `${url} → 429 被限流了，稍等一下再试`;
+        default:
+            return `${url} → HTTP ${status}（${detail}）`;
+    }
+}
+
+/**
+ * 网络层失败（fetch 直接抛，没有状态码）。
+ *
+ * 手机浏览器里跑到这儿，九成是这两种：
+ *  1. CORS —— 浏览器拦了跨域，控制台会有红色 CORS 报错
+ *  2. 网络不通 —— 手机当前 WiFi/流量到不了该 API 域名（境外 API 最常见）
+ * 必须分开说，因为解决办法完全不同。
+ *
+ * @param {any} err
+ * @param {string} url
+ * @returns {string}
+ */
+function describeNetworkFailure(err, url) {
+    const msg = String(err?.message ?? err);
+    // TypeError: Failed to fetch 是浏览器对「请求没发出去」的统一说法，
+    // 背后可能是 CORS、DNS、TLS、断网，只能并列让用户自己排
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+        return `${url} 请求没发出去（浏览器报 ${msg}）`
+            + '。手机上通常是：① 当前网络到不了这个 API 域名（境外 API 需要能访问它的网络）'
+            + '；② 该平台的 CORS 不允许浏览器直连。'
+            + '两种情况都可以先在输入框里手打模型名，能聊天就说明只是拉列表不行';
+    }
+    if (/abort|timeout/i.test(msg)) return `${url} 超时了，检查网络或稍后重试`;
+    return `${url} → ${msg}`;
 }
 
 /** 把服务端的错误响应压成一句人话，避免一坨 HTML 糊在 UI 上 */
