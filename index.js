@@ -1153,15 +1153,16 @@ function bindSettingsControls(host) {
         });
     });
 
-    // 联动 ST 原生的 inline-drawer 折叠行为
-    host.querySelectorAll('.inline-drawer-toggle').forEach(t => {
-        t.addEventListener('click', () => {
-            const content = t.parentElement.querySelector('.inline-drawer-content');
-            const icon = t.querySelector('.inline-drawer-icon');
-            if (content) content.style.display = content.style.display === 'none' ? '' : 'none';
-            icon?.classList.toggle('up');
-            icon?.classList.toggle('down');
-        });
+    // ---- 抽屉展开/收起 ----
+    // 不要自己绑 click：ST 原生已经用 jQuery 事件委托接管了
+    //     $(document).on('click', '.inline-drawer-toggle', ...)   // script.js
+    // 动态插入的元素同样会被它命中，用的是 slideToggle()。
+    // 早先自己写的那份会在 inline style.display 上和 slideToggle 抢，
+    // 症状是「点一下能打开、再点一下收不回去」——因为 slideToggle 读到
+    // 对方刚写下的 display 值，每次都往同一个方向翻。
+    // 所以这里只做一件事：把初始状态设为展开。
+    host.querySelectorAll('.inline-drawer-content').forEach(el => {
+        el.style.display = 'block';
     });
 }
 
