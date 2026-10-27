@@ -19,7 +19,7 @@ import {
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
 import { buildCardContent, getExistingTags, getCharacterDisplayName } from './src/extract.js';
-import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText } from './src/api.js';
+import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText, isEmptyTagResult } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
 
 const context = SillyTavern.getContext();
@@ -377,6 +377,10 @@ async function runAnalysis() {
 
         try {
             const { system, user } = buildPrompts(text);
+            // 留档「模型到底看到了什么」：交白卷时，raw 弹窗里展示发送内容，
+            // 这是区分「没抽到内容」和「模型不给力」的第一现场
+            job.sentLength = text.length;
+            job.sentPreview = text.slice(0, 600);
             const result = await requestCardTags({
                 systemPrompt: system,
                 userPrompt: user,
@@ -481,6 +485,9 @@ async function retryFailed() {
 
         try {
             const { system, user } = buildPrompts(text);
+            // 同 runAnalysis：留档发送内容，供「看原文」排查交白卷
+            job.sentLength = text.length;
+            job.sentPreview = text.slice(0, 600);
             const result = await requestCardTags({
                 systemPrompt: system,
                 userPrompt: user,
@@ -559,6 +566,19 @@ function describeEmptyResult(job, err) {
 
     if (!raw) return '模型返回了空内容 —— 可能是超时或被限流，把「重试次数」调到 2 试试';
 
+    // 合法 JSON 但俩数组都空：模型「稳妥」交了白卷。
+    // 手机上「模型没给出任何标签」最常见的死法之一——模型看懂了格式，
+    // 却一个标签都不给。跟拒答、截断的解决办法完全不同，必须分开说。
+    if (isEmptyTagResult(raw)) {
+        const sent = job?.sentLength
+            ? `（本次发给模型的内容约 ${job.sentLength} 字符${job.sentLength < 200 ? '，明显偏少，优先去检查抽取字段' : ''}）`
+            : '';
+        return `模型返回了合法 JSON，但 pick / new_tags 都是空的${sent} —— 模型看懂了格式却交白卷。`
+            + '常见原因：① 抽取到的卡面内容太少或字段没选对；② 模型太保守或太弱；③ 卡面内容敏感被软拒。'
+            + '已自动用加强提示词重试仍为空。可尝试：换更强的模型、只保留「描述」字段、'
+            + '或在「附加指令」里写「至少给出 1 个标签」。点「看原文」可核对发给模型的内容。';
+    }
+
     const lower = raw.toLowerCase();
 
     // 审核/拒答：这是跑 NSFW 卡最常见的死法
@@ -591,22 +611,39 @@ function activeTags(job) {
  *
  * 这一屏是排查「模型没给出任何标签」的主要手段：
  * 看到「抱歉，我无法…」= 审核/破限问题；看到半截 JSON = max_tokens 不够；
- * 看到一堆 markdown 废话 = 模型没听话，需要在设置里加附加指令。
+ * 看到合法 JSON 但俩数组都空 = 模型交白卷，这时要连带看「发送内容」——
+ * 是卡面素材没抽到，还是模型看到了内容却不肯给标签。
  */
 function showRawDialog(job) {
     const raw = String(job.raw ?? '');
     const preview = raw.length > 6000 ? `${raw.slice(0, 6000)}\n\n…（已截断，共 ${raw.length} 字符）` : raw;
 
-    const verdict = /抱歉|对不起|sorry|can't|cannot|unable|无法|不能|违反|敏感|违规/i.test(raw)
-        ? '<b style="color:#e06c75">这看着像是被内容审核拦了 / 破限失败。</b><br>'
+    let verdict;
+    if (isEmptyTagResult(raw)) {
+        verdict = '<b style="color:#e5c07b">JSON 合法，但两个标签数组都是空的 —— 模型交了白卷。</b><br>'
+            + '模型看懂了格式、却一个标签都不给。先看下方「发送给模型的内容」确认卡面素材是否真的抽到了；'
+            + '内容正常的话，就是模型太保守或太弱 —— 换个模型，或在「附加指令」里写「至少给出 1 个标签」。<br><br>';
+    } else if (/抱歉|对不起|sorry|can't|cannot|unable|无法|不能|违反|敏感|违规/i.test(raw)) {
+        verdict = '<b style="color:#e06c75">这看着像是被内容审核拦了 / 破限失败。</b><br>'
             + '模型返回的是自然语言而不是 JSON。可试试：<br>'
             + '• 换个不过审的模型或中转站<br>'
             + '• 在「附加指令」里弱化提示词，让它只做分类、不复述卡片内容<br>'
-            + '• 减少读取的字段（先只读「描述」试）<br><br>'
-        : /^[[{]/.test(raw) && !/[\]}]\s*$/.test(raw)
-            ? '<b style="color:#e5c07b">JSON 只写了一半，是被 max_tokens 截断了。</b><br>'
-              + '去设置里把「单次最大 token」提到 800 以上，同时减少单次读取的字段。<br><br>'
-            : '';
+            + '• 减少读取的字段（先只读「描述」试）<br><br>';
+    } else if (/^[[{]/.test(raw) && !/[\]}]\s*$/.test(raw)) {
+        verdict = '<b style="color:#e5c07b">JSON 只写了一半，是被 max_tokens 截断了。</b><br>'
+            + '去设置里把「单次最大 token」提到 800 以上，同时减少单次读取的字段。<br><br>';
+    } else {
+        verdict = '';
+    }
+
+    // 「模型到底看到了什么」——交白卷时这是第一现场：
+    // 这里只有寥寥几行 = 抽取字段没选对/卡面是空的；内容详实 = 模型的问题
+    const sentBlock = job.sentPreview
+        ? `<div style="opacity:.7;font-size:.9em;margin:12px 0 6px;">`
+          + `发送给模型的内容（共 ${job.sentLength ?? 0} 字符，下方为前 ${job.sentPreview.length} 字符预览）：</div>`
+          + `<pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.85em;max-height:30vh;overflow:auto;">`
+          + `${escapeHtml(job.sentPreview)}${(job.sentLength ?? 0) > job.sentPreview.length ? '\n…（其余部分未显示）' : ''}</pre>`
+        : '';
 
     context.callGenericPopup(
         `<div style="text-align:left;max-height:60vh;overflow:auto;">`
@@ -614,7 +651,8 @@ function showRawDialog(job) {
         + `<div style="opacity:.7;font-size:.9em;margin-bottom:6px;">`
         + `角色：${escapeHtml(job.name)} · 返回 ${raw.length} 字符</div>`
         + `<pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.85em;">`
-        + `${escapeHtml(preview)}</pre></div>`,
+        + `${escapeHtml(preview)}</pre>`
+        + `${sentBlock}</div>`,
         context.POPUP_TYPE.TEXT,
     );
 }
