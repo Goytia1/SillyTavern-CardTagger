@@ -730,6 +730,20 @@
     cursor: help;
 }
 
+/* 「最新」角标：同组同名卡里导入最晚的那张 */
+.ct-latest-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border: 1px solid rgba(97, 175, 239, 0.6);
+    border-radius: 4px;
+    background: rgba(97, 175, 239, 0.12);
+    color: #61afef;
+    font-size: 0.78em;
+    vertical-align: middle;
+    cursor: help;
+}
+
 .ct-status-failed {
     line-height: 1.5;
 }
