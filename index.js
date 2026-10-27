@@ -18,7 +18,7 @@ import {
     SYSTEM_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
-import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent, isShallowCharacter } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent, isShallowCharacter, findSameNameCharacters, countSameNameGroups } from './src/extract.js';
 import { fetchFullCharacter } from './src/cardfile.js';
 import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText, isEmptyTagResult } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
@@ -267,12 +267,17 @@ async function listCandidates() {
     const s = getSettings();
     const skippedTagged = s.skip_tagged && state.ui.scope.value !== 'untagged';
 
+    // 同名角色数在列表阶段就算好：候选行显示「同名×N」角标，
+    // 用户能直接看出「这几张是一样的，只分析一个就行」
+    const sameNameOf = (name, avatar) => findSameNameCharacters(context, name, avatar).length;
+
     state.jobs = targets.map((character, index) => ({
         index,
         avatar: String(character.avatar ?? ''),
         name: getCharacterDisplayName(character),
         existingTags: getExistingTags(character),
         cardTags: [...getExistingTags(character)],
+        sameNameCount: sameNameOf(getCharacterDisplayName(character), String(character.avatar ?? '')),
         status: 'candidate',
         pick: [],
         newTags: [],
@@ -756,6 +761,15 @@ function buildRow(job) {
         exist.textContent = `原有：${job.existingTags.join('、')}`;
         wrap.appendChild(exist);
     }
+    // 同名角标：让用户在开跑前就发现「这几张是一样的」，
+    // 只分析其中一个，其余用「同名同步」即可，省 AI token
+    if (job.sameNameCount > 0) {
+        const badge = document.createElement('span');
+        badge.className = 'ct-same-name';
+        badge.textContent = `同名×${job.sameNameCount}`;
+        badge.title = `还有 ${job.sameNameCount} 个同名角色 —— 只需分析其中一个，其余可在出结果后一键同步标签`;
+        wrap.appendChild(badge);
+    }
     tdName.appendChild(wrap);
     tr.appendChild(tdName);
 
@@ -927,13 +941,33 @@ function buildStatus(job) {
 
     el.className = 'ct-status-text ct-status-ok';
     const count = activeTags(job).length;
-    el.textContent = job.salvaged ? `✓ ${count} 个（从原文抢救）` : `✓ ${count} 个标签`;
+    el.textContent = job.salvaged
+        ? `✓ ${count} 个（从原文抢救）`
+        : job.syncedFrom
+            ? `✓ ${count} 个（同步自 ${job.syncedFrom}）`
+            : `✓ ${count} 个标签`;
     if (job.reason) el.title = job.reason;
     // 成功行同样能看原文 + 内容来源，方便随时抽检
     const okRawLink = buildRawLink(job);
     if (okRawLink) el.appendChild(okRawLink);
     const okNote = buildSourceNote(job);
     if (okNote) el.appendChild(okNote);
+    // 有名角色：一键把本卡标签同步给其余同名卡，省 AI 重复读
+    const sameName = job.sameNameCount > 0
+        ? job.sameNameCount
+        : findSameNameCharacters(context, job.name, job.avatar).length;
+    if (sameName > 0 && count > 0 && !job.salvaged) {
+        const syncBtn = document.createElement('button');
+        syncBtn.type = 'button';
+        syncBtn.className = 'ct-sync-link';
+        const synced = job.syncedTo?.length ?? 0;
+        syncBtn.textContent = synced ? `已同步 ${synced} 个 ✓` : `同名×${sameName}`;
+        syncBtn.title = synced
+            ? `已同步给 ${synced} 个同名角色；库里有新同名卡可再点一次补同步`
+            : `一键把本卡标签应用到另外 ${sameName} 个同名角色，不用再调 AI`;
+        syncBtn.addEventListener('click', () => syncToSameName(job));
+        el.appendChild(syncBtn);
+    }
     return el;
 }
 
@@ -960,10 +994,13 @@ function updateFooterStats() {
     // 同时把确认按钮的文案同步成实际勾选数，避免点下去才发现数量不对
     if (candidates.length && !state.running) {
         const picked = candidates.filter(j => j.selected).length;
+        const sameGroups = countSameNameGroups(candidates);
         state.ui.footerStats.textContent =
-            `已列出 ${candidates.length} 个角色 · 勾选 ${picked} 个 · 确认后开始调 AI`;
+            `已列出 ${candidates.length} 个角色 · 勾选 ${picked} 个 · 确认后开始调 AI`
+            + (sameGroups ? ` · ${sameGroups} 组同名，可只分析其一、其余用「同名同步」` : '');
         state.ui.applyLocal.disabled = true;
         state.ui.applyCard.disabled = true;
+        if (state.ui.syncSame) state.ui.syncSame.disabled = true;
         if (state.ui.confirmRun) {
             state.ui.confirmRun.hidden = false;
             state.ui.confirmRun.innerHTML =
@@ -986,6 +1023,17 @@ function updateFooterStats() {
 
     state.ui.applyLocal.disabled = !selected.length || state.running;
     state.ui.applyCard.disabled = !selected.length || state.running;
+    // 「同名同步」只看有没有「出了标签的角色」×「存在同名」，
+    // 跟勾选无关——它同步的目标是库里的其他同名卡，不是当前列表
+    if (state.ui.syncSame) {
+        const syncable = state.jobs.some(j =>
+            j.status === 'ok' && activeTags(j).length && !j.salvaged
+            && findSameNameCharacters(context, j.name, j.avatar).length > 0);
+        state.ui.syncSame.disabled = !syncable || state.running;
+        state.ui.syncSame.title = syncable
+            ? '把已出标签角色的标签一键写给其他同名角色（只写本地标签，不调 AI）'
+            : '没有可同步的同名角色';
+    }
 }
 
 // ============================================================================
@@ -1076,6 +1124,144 @@ async function applyCard() {
     }
 }
 
+// ============================================================================
+// 同名角色标签同步
+// ============================================================================
+
+/**
+ * 把某个角色的标签同步给其他同名角色（核心执行，调用方负责确认）。
+ *
+ * 省的是 AI token：同名卡（不同作者/版本）内容大同小异，读一张就够。
+ * - 本地标签：所有同名角色立即写入（ST 的筛选就靠这套，零风险）
+ * - 列表里的同名候选：直接标记为已同步（ok + syncedFrom），跳过 AI，
+ *   用户还能继续微调这些标签，之后走统一的「回填卡片」流程
+ *
+ * @param {object} job 标签来源任务
+ * @param {Array<{ avatar: string, name: string }>} targets 同名目标
+ * @returns {Promise<number>} 列表里被直接标记为已同步的候选数
+ */
+async function applySyncToSameName(job, targets) {
+    const tags = activeTags(job);
+
+    // 1) 本地标签：所有目标都写（含不在当前列表里的同名卡）
+    for (const t of targets) {
+        assignLocalTags(context, t.avatar, tags);
+        job.syncedTo = job.syncedTo ?? [];
+        if (!job.syncedTo.includes(t.avatar)) job.syncedTo.push(t.avatar);
+    }
+    persistLocalTags(context);
+
+    // 2) 列表里的同名候选：直接标记为已同步，跳过 AI
+    const inList = state.jobs.filter(j =>
+        j !== job && j.name === job.name && j.status === 'candidate');
+    for (const j of inList) {
+        j.pick = [...tags];
+        j.newTags = [];
+        j.removedTags = new Set();
+        j.status = 'ok';
+        j.syncedFrom = job.name;
+        j.selected = true;
+        j.error = '';
+        refreshRow(j);
+    }
+
+    refreshRow(job);
+    updateFooterStats();
+    return inList.length;
+}
+
+/**
+ * 单行「同名×N」按钮：确认后同步。
+ */
+async function syncToSameName(job) {
+    if (state.running) return;
+
+    const tags = activeTags(job);
+    if (!tags.length) {
+        toastr.warning('这个角色没有可同步的标签', 'CardTagger');
+        return;
+    }
+
+    const targets = findSameNameCharacters(context, job.name, job.avatar);
+    if (!targets.length) {
+        toastr.info('库里没有其他同名角色了', 'CardTagger');
+        return;
+    }
+
+    const confirm = await context.callGenericPopup(
+        `要把「${escapeHtml(job.name)}」的 ${tags.length} 个标签<br>`
+        + `<b>${escapeHtml(tags.join('、'))}</b><br><br>`
+        + `同步到另外 ${targets.length} 个同名角色吗？<br>`
+        + `<div style="opacity:.75;font-size:.9em;margin-top:6px;">`
+        + `${targets.map(t => '• ' + escapeHtml(t.avatar)).join('<br>')}</div><br>`
+        + `将直接写入这些角色的<b>本地标签</b>（不改卡片文件）。`,
+        context.POPUP_TYPE.CONFIRM,
+    );
+    if (confirm !== context.POPUP_RESULT.AFFIRMATIVE) return;
+
+    const skipped = await applySyncToSameName(job, targets);
+    toastr.success(
+        `已同步到 ${targets.length} 个同名角色`
+        + (skipped ? `，其中 ${skipped} 个直接跳过 AI` : ''),
+        'CardTagger',
+    );
+    try {
+        await context.eventSource.emit(context.eventTypes.CHARACTER_EDITED, { detail: 'card-tagger' });
+    } catch { /* 刷新失败不影响已落盘的数据 */ }
+}
+
+/**
+ * 页脚「同名同步」：一把把所有已出结果角色的标签同步给各自同名角色。
+ * 同名组内只认领一次，避免两个同名源互相覆盖。
+ */
+async function syncAllSameName() {
+    if (state.running) return;
+
+    const sources = state.jobs.filter(j => j.status === 'ok' && activeTags(j).length && !j.salvaged);
+    if (!sources.length) {
+        toastr.info('还没有分析完成的结果可同步', 'CardTagger');
+        return;
+    }
+
+    const plan = [];
+    const claimed = new Set();
+    for (const job of sources) {
+        const targets = findSameNameCharacters(context, job.name, job.avatar)
+            .filter(t => !claimed.has(t.avatar));
+        if (!targets.length) continue;
+        for (const t of targets) claimed.add(t.avatar);
+        plan.push({ job, targets });
+    }
+
+    if (!plan.length) {
+        toastr.info('没有找到可同步的同名角色', 'CardTagger');
+        return;
+    }
+
+    const total = plan.reduce((n, p) => n + p.targets.length, 0);
+    const confirm = await context.callGenericPopup(
+        `即将把 ${plan.length} 个角色的标签同步给 ${total} 个同名角色：<br><br>`
+        + `<div style="text-align:left;font-size:.9em;">`
+        + `${plan.map(p => `• ${escapeHtml(p.job.name)} → ${p.targets.length} 个同名角色`).join('<br>')}</div><br>`
+        + `只写入<b>本地标签</b>，不改卡片文件。列表里的同名候选会直接标记为已同步、不再调 AI。`,
+        context.POPUP_TYPE.CONFIRM,
+    );
+    if (confirm !== context.POPUP_RESULT.AFFIRMATIVE) return;
+
+    let skipped = 0;
+    for (const p of plan) {
+        skipped += await applySyncToSameName(p.job, p.targets);
+    }
+
+    toastr.success(
+        `已同步 ${total} 个同名角色` + (skipped ? `，其中 ${skipped} 个跳过 AI` : ''),
+        'CardTagger',
+    );
+    try {
+        await context.eventSource.emit(context.eventTypes.CHARACTER_EDITED, { detail: 'card-tagger' });
+    } catch { /* 刷新失败不影响已落盘的数据 */ }
+}
+
 function exportResults() {
     const list = state.jobs.filter(j => j.status === 'ok');
     if (!list.length) return;
@@ -1143,6 +1329,7 @@ async function ensurePanel() {
         version: $('ct_version'),
         applyLocal: $('ct_apply_local'),
         applyCard: $('ct_apply_card'),
+        syncSame: $('ct_sync_same'),
         exportBtn: $('ct_export'),
     };
 
@@ -1241,6 +1428,7 @@ async function ensurePanel() {
 
     state.ui.applyLocal.addEventListener('click', () => applyLocal());
     state.ui.applyCard.addEventListener('click', () => applyCard());
+    state.ui.syncSame?.addEventListener('click', () => syncAllSameName());
     state.ui.exportBtn.addEventListener('click', () => exportResults());
 
     refreshCount();
