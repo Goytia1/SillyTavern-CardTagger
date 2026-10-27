@@ -19,7 +19,7 @@ import {
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
 import { buildCardContent, getExistingTags, getCharacterDisplayName } from './src/extract.js';
-import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList } from './src/api.js';
+import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
 
 const context = SillyTavern.getContext();
@@ -31,6 +31,8 @@ const state = {
     running: false,
     controller: null,
     panelRoot: null,
+    /** 已列出候选角色的标记；null 表示还没列过，此时不许直接开跑 */
+    candidates: null,
 };
 
 // ============================================================================
@@ -234,7 +236,15 @@ function validateBeforeRun() {
     return null;
 }
 
-async function runAnalysis() {
+/**
+ * 第一步：把当前范围命中的角色列出来，填满结果区。
+ *
+ * 之前点「开始分析」就直接调 AI，中间一大块全是空白，跑完才有内容 ——
+ * 既没法确认范围对不对，几十张卡跑完发现选错了也来不及。
+ * 现在先列候选：每行显示角色名、卡片内嵌标签、本地标签，
+ * 全部默认勾选，用户手动排除后再点底部的「开始分析」。
+ */
+async function listCandidates() {
     if (state.running) return;
 
     const invalid = validateBeforeRun();
@@ -245,17 +255,92 @@ async function runAnalysis() {
 
     const { targets, note } = resolveTargets();
     if (!targets.length) {
+        state.jobs = [];
+        state.candidates = null;
+        renderRows();
+        updateFooterStats();
         toastr.warning(note || '没有符合条件的角色', 'CardTagger');
         return;
     }
-    if (note) toastr.info(note, 'CardTagger');
 
     const s = getSettings();
+    const skippedTagged = s.skip_tagged && state.ui.scope.value !== 'untagged';
+
+    state.jobs = targets.map((character, index) => ({
+        index,
+        avatar: String(character.avatar ?? ''),
+        name: getCharacterDisplayName(character),
+        existingTags: getExistingTags(character),
+        cardTags: [...getExistingTags(character)],
+        status: 'candidate',
+        pick: [],
+        newTags: [],
+        removedTags: new Set(),
+        reason: '',
+        selected: true,
+        error: '',
+        raw: '',
+        salvaged: false,
+    }));
+
+    state.candidates = { count: targets.length, skippedTagged, note: note ?? '' };
+    renderRows();
+    updateFooterStats();
+
+    // 候选条：说清这次会处理多少张、以及为什么
+    const parts = [`命中 ${targets.length} 个角色`];
+    if (skippedTagged) parts.push('已自动跳过有本地标签的');
+    if (note) parts.push(note);
+    state.ui.candidateText.textContent = `${parts.join(' · ')}。取消勾选可排除单个角色，确认后点右下角「开始分析」。`;
+    state.ui.candidateBar.hidden = false;
+    state.ui.confirmRun.hidden = false;
+
+    // 有内容了就收起空状态提示
+    state.ui.emptyState.hidden = true;
+    state.ui.table.hidden = false;
+
+    toastr.info(`已列出 ${targets.length} 个角色，勾完点「开始分析」`, 'CardTagger');
+}
+
+async function runAnalysis() {
+    if (state.running) return;
+
+    // 没列过候选就不许开跑 —— 用户必须先看到会处理哪些角色
+    if (!state.candidates) {
+        listCandidates();
+        return;
+    }
+
+    const invalid = validateBeforeRun();
+    if (invalid) {
+        toastr.warning(invalid, 'CardTagger');
+        return;
+    }
+
+    // 只跑勾中的；没勾选的一律不动
+    const chosen = state.jobs.filter(j => j.selected);
+    if (!chosen.length) {
+        toastr.warning('一个角色都没勾选', 'CardTagger');
+        return;
+    }
+
+    const s = getSettings();
+    const all = Array.isArray(context.characters) ? context.characters : [];
+    const byAvatar = new Map(all.map(c => [String(c?.avatar), c]));
+    const targets = chosen
+        .map(j => byAvatar.get(j.avatar))
+        .filter(Boolean);
+    if (!targets.length) {
+        toastr.warning('选中的角色已不存在，请重新列出', 'CardTagger');
+        return;
+    }
 
     state.running = true;
     state.controller = new AbortController();
     const signal = state.controller.signal;
 
+    // 候选阶段结束：确认按钮藏起来，避免跑一半又被点一次
+    state.ui.confirmRun.hidden = true;
     state.ui.start.hidden = true;
     state.ui.abort.hidden = false;
     state.ui.retryFailed.hidden = true;
@@ -263,23 +348,11 @@ async function runAnalysis() {
     state.ui.applyCard.disabled = true;
     state.ui.emptyState.hidden = true;
     state.ui.table.hidden = false;
-    state.ui.resultBody.innerHTML = '';
 
-    // 初始化作业表
-    state.jobs = targets.map((character, index) => ({
-        index,
-        avatar: String(character.avatar ?? ''),
-        name: getCharacterDisplayName(character),
-        existingTags: getExistingTags(character),
-        cardTags: [...getExistingTags(character)],
-        status: 'pending',
-        pick: [],
-        newTags: [],
-        removedTags: new Set(),
-        reason: '',
-        selected: true,
-        error: '',
-    }));
+    // 作业表沿用 listCandidates 建好的行，只把状态从 candidate 推到 pending，
+    // 不重新建 —— 否则用户刚取消的勾选会被重置回全选。
+    // index 必须与 targets 对齐（任务里用的是 targets[job.index]）
+    state.jobs = chosen.map((job, i) => ({ ...job, index: i, status: 'pending', error: '' }));
 
     renderRows();
 
@@ -313,7 +386,21 @@ async function runAnalysis() {
                 retryTimes: Number(s.retry_times) || 0,
             });
 
-            const { pick, newTags } = normalizeResult(result, s);
+            job.raw = result.raw ?? '';
+
+            let { pick, newTags } = normalizeResult(result, s);
+
+            // 模型没按 JSON 答（被审核拦、破限失败、格式跑偏）时，
+            // 拿词表去原文里做子串匹配，能捞回几个是几个。
+            // 不然整张卡只会显示一句「模型没给出任何标签」，白白浪费一次调用。
+            if (!pick.length && !newTags.length && job.raw) {
+                const salvaged = salvageTagsFromText(job.raw, s.tag_pool ?? []);
+                if (salvaged.length) {
+                    pick = salvaged.slice(0, Number(s.max_tags) || 4);
+                    job.salvaged = true;
+                }
+            }
+
             job.pick = pick;
             job.newTags = newTags;
             job.reason = result.reason;
@@ -321,11 +408,16 @@ async function runAnalysis() {
 
             if (!job.pick.length && !job.newTags.length) {
                 job.status = 'failed';
-                job.error = '模型没给出任何标签';
+                job.error = describeEmptyResult(job);
             }
         } catch (err) {
             job.status = 'failed';
-            job.error = err instanceof AbortedError ? '已中断' : String(err?.message ?? err);
+            if (err instanceof AbortedError) {
+                job.error = '已中断';
+            } else {
+                job.raw = err?.raw ?? job.raw ?? '';
+                job.error = describeEmptyResult(job, err);
+            }
         } finally {
             if (s.request_delay_ms > 0 && !signal.aborted) {
                 await new Promise(r => setTimeout(r, Number(s.request_delay_ms) || 0));
@@ -350,7 +442,6 @@ async function runAnalysis() {
     state.ui.abort.hidden = true;
     state.ui.retryFailed.hidden = failed === 0;
     hideProgress();
-
     updateFooterStats();
 
     toastr.info(`完成：成功 ${succeeded}，失败 ${failed}`, 'CardTagger');
@@ -398,15 +489,30 @@ async function retryFailed() {
                 signal,
                 retryTimes: Number(s.retry_times) || 0,
             });
-            const { pick, newTags } = normalizeResult(result, s);
+            job.raw = result.raw ?? '';
+
+            let { pick, newTags } = normalizeResult(result, s);
+            if (!pick.length && !newTags.length && job.raw) {
+                const salvaged = salvageTagsFromText(job.raw, s.tag_pool ?? []);
+                if (salvaged.length) {
+                    pick = salvaged.slice(0, Number(s.max_tags) || 4);
+                    job.salvaged = true;
+                }
+            }
+
             job.pick = pick;
             job.newTags = newTags;
             job.reason = result.reason;
             job.status = (job.pick.length || job.newTags.length) ? 'ok' : 'failed';
-            if (job.status === 'failed') job.error = '模型没给出任何标签';
+            if (job.status === 'failed') job.error = describeEmptyResult(job);
         } catch (err) {
             job.status = 'failed';
-            job.error = err instanceof AbortedError ? '已中断' : String(err?.message ?? err);
+            if (err instanceof AbortedError) {
+                job.error = '已中断';
+            } else {
+                job.raw = err?.raw ?? job.raw ?? '';
+                job.error = describeEmptyResult(job, err);
+            }
         }
 
         done++;
@@ -428,9 +534,97 @@ async function retryFailed() {
 // 结果表格渲染
 // ============================================================================
 
+/**
+ * 生成空结果的失败原因。
+ *
+ * 直接说「模型没给出任何标签」等于没说 —— 真实原因通常是那几样：
+ * 审核拦截、破限失败、max_tokens 截断、或者模型压根没按格式答。
+ * 用原文做个粗判，把可能性点出来，用户才知道该往哪调。
+ *
+ * @param {{ raw?: string }} job
+ * @param {Error} [err]
+ * @returns {string}
+ */
+function describeEmptyResult(job, err) {
+    const raw = String(job?.raw ?? '').trim();
+    const msg = err ? String(err?.message ?? '') : '';
+
+    // 网络/HTTP 层错误：模型根本没答话，跟内容无关
+    if (err && !/TagParseError/.test(err?.name ?? '')) {
+        const net = /fetch|network|Failed/i.test(msg);
+        return net
+            ? `请求没发出去或没响应（${msg.slice(0, 80)}）—— 检查网络/API 地址，或看「拉取模型」能不能通`
+            : msg.slice(0, 100);
+    }
+
+    if (!raw) return '模型返回了空内容 —— 可能是超时或被限流，把「重试次数」调到 2 试试';
+
+    const lower = raw.toLowerCase();
+
+    // 审核/拒答：这是跑 NSFW 卡最常见的死法
+    const refusal = [
+        '抱歉', '对不起', '无法', '不能', 'sorry', "can't", 'cannot', 'unable',
+        'not able', 'i am unable', 'against my', 'content policy', 'policy',
+        '违反', '敏感', '违规', '不适宜', ' inappropriate',
+    ].find(k => lower.includes(k.toLowerCase()));
+
+    // JSON 被 max_tokens 从中间切断：开头像 JSON 但 parse 不过
+    const looksTruncatedJson = /^[[{]/.test(raw) && !/[\]}]\s*$/.test(raw);
+
+    if (refusal) {
+        return `模型拒答了（返回的是自然语言，不是 JSON）—— 疑似内容审核/破限失败。点「看原文」确认`;
+    }
+    if (looksTruncatedJson) {
+        return `模型回答被截断（JSON 只写了一半）—— 把「单次最大 token」从 300 提到 800 以上`;
+    }
+    return `模型没给出有效标签（返回的不是 JSON）—— 点「看原文」看看它说了什么`;
+}
+
+/** 该卡最终要写入的标签（剔除用户手动删掉的） */
 function activeTags(job) {
     const removed = job.removedTags ?? new Set();
     return [...job.pick, ...job.newTags].filter(x => !removed.has(x));
+}
+
+/**
+ * 展示模型的原始返回。
+ *
+ * 这一屏是排查「模型没给出任何标签」的主要手段：
+ * 看到「抱歉，我无法…」= 审核/破限问题；看到半截 JSON = max_tokens 不够；
+ * 看到一堆 markdown 废话 = 模型没听话，需要在设置里加附加指令。
+ */
+function showRawDialog(job) {
+    const raw = String(job.raw ?? '');
+    const preview = raw.length > 6000 ? `${raw.slice(0, 6000)}\n\n…（已截断，共 ${raw.length} 字符）` : raw;
+
+    const verdict = /抱歉|对不起|sorry|can't|cannot|unable|无法|不能|违反|敏感|违规/i.test(raw)
+        ? '<b style="color:#e06c75">这看着像是被内容审核拦了 / 破限失败。</b><br>'
+            + '模型返回的是自然语言而不是 JSON。可试试：<br>'
+            + '• 换个不过审的模型或中转站<br>'
+            + '• 在「附加指令」里弱化提示词，让它只做分类、不复述卡片内容<br>'
+            + '• 减少读取的字段（先只读「描述」试）<br><br>'
+        : /^[[{]/.test(raw) && !/[\]}]\s*$/.test(raw)
+            ? '<b style="color:#e5c07b">JSON 只写了一半，是被 max_tokens 截断了。</b><br>'
+              + '去设置里把「单次最大 token」提到 800 以上，同时减少单次读取的字段。<br><br>'
+            : '';
+
+    context.callGenericPopup(
+        `<div style="text-align:left;max-height:60vh;overflow:auto;">`
+        + `${verdict}`
+        + `<div style="opacity:.7;font-size:.9em;margin-bottom:6px;">`
+        + `角色：${escapeHtml(job.name)} · 返回 ${raw.length} 字符</div>`
+        + `<pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.85em;">`
+        + `${escapeHtml(preview)}</pre></div>`,
+        context.POPUP_TYPE.TEXT,
+    );
+}
+
+function escapeHtml(str) {
+    return String(str ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
 }
 
 function renderRows() {
@@ -447,12 +641,12 @@ function buildRow(job) {
     tr.dataset.avatar = job.avatar;
     if (job.status === 'failed') tr.classList.add('ct-row-failed');
 
-    // 勾选
+    // 勾选（候选阶段也要能操作，否则没法排除单个角色）
     const tdCheck = document.createElement('td');
     const check = document.createElement('input');
     check.type = 'checkbox';
-    check.checked = job.selected && job.status === 'ok';
-    check.disabled = job.status !== 'ok';
+    check.checked = job.selected && (job.status === 'ok' || job.status === 'candidate');
+    check.disabled = !(job.status === 'ok' || job.status === 'candidate');
     check.addEventListener('change', () => {
         job.selected = check.checked;
         updateFooterStats();
@@ -495,6 +689,28 @@ function buildRow(job) {
 
 function buildChips(job, container) {
     const frag = document.createDocumentFragment();
+
+    // 候选阶段还没有 AI 标签，这时该显示的是卡片自带的标签，
+    // 让用户在开跑前就能看出这个角色大概是什么类型、值不值得处理
+    if (job.status === 'candidate') {
+        const own = job.existingTags ?? [];
+        if (!own.length) {
+            const hint = document.createElement('span');
+            hint.className = 'ct-hint';
+            hint.textContent = '卡片本身没写标签';
+            frag.appendChild(hint);
+            return frag;
+        }
+        for (const tag of own) {
+            const chip = document.createElement('span');
+            chip.className = 'ct-chip ct-chip-existing';
+            chip.title = '卡片内嵌的标签（导出时会跟着走，但不参与筛选）';
+            chip.textContent = tag;
+            frag.appendChild(chip);
+        }
+        return frag;
+    }
+
     const isNew = new Set(job.newTags);
 
     for (const tag of [...job.pick, ...job.newTags]) {
@@ -561,6 +777,11 @@ function buildChips(job, container) {
 function buildStatus(job) {
     const el = document.createElement('div');
 
+    if (job.status === 'candidate') {
+        el.className = 'ct-status-text ct-status-candidate';
+        el.textContent = '待确认';
+        return el;
+    }
     if (job.status === 'pending') {
         el.className = 'ct-status-text';
         el.textContent = '排队中…';
@@ -569,12 +790,23 @@ function buildStatus(job) {
     if (job.status === 'failed') {
         el.className = 'ct-status-text ct-status-failed';
         el.textContent = job.error || '失败';
+
+        // 有原文就一定给看的入口：审核拦截、格式跑偏、被截断，
+        // 光看这句提示是猜不出来的，必须让用户亲眼看到模型说了什么
+        if (job.raw) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'ct-raw-link';
+            btn.textContent = '看原文';
+            btn.addEventListener('click', () => showRawDialog(job));
+            el.appendChild(btn);
+        }
         return el;
     }
 
     el.className = 'ct-status-text ct-status-ok';
     const count = activeTags(job).length;
-    el.textContent = count ? `✓ ${count} 个标签` : '✓ 无标签';
+    el.textContent = job.salvaged ? `✓ ${count} 个（从原文抢救）` : `✓ ${count} 个标签`;
     if (job.reason) el.title = job.reason;
     return el;
 }
@@ -584,8 +816,9 @@ function refreshRow(job) {
 
     const { tr, check, tdTags, tdStatus } = job._els;
     tr.classList.toggle('ct-row-failed', job.status === 'failed');
-    check.disabled = job.status !== 'ok';
-    check.checked = job.selected && job.status === 'ok';
+    // 候选阶段也要能勾/能取消，这是用户排除单个角色的唯一入口
+    check.disabled = !(job.status === 'ok' || job.status === 'candidate') || state.running;
+    check.checked = job.selected && (job.status === 'ok' || job.status === 'candidate');
 
     tdTags.innerHTML = '';
     tdTags.appendChild(buildChips(job, tdTags));
@@ -595,6 +828,25 @@ function refreshRow(job) {
 }
 
 function updateFooterStats() {
+    const candidates = state.jobs.filter(j => j.status === 'candidate');
+
+    // 候选阶段：还没跑 AI，统计的应该是「将要分析几个」，
+    // 同时把确认按钮的文案同步成实际勾选数，避免点下去才发现数量不对
+    if (candidates.length && !state.running) {
+        const picked = candidates.filter(j => j.selected).length;
+        state.ui.footerStats.textContent =
+            `已列出 ${candidates.length} 个角色 · 勾选 ${picked} 个 · 确认后开始调 AI`;
+        state.ui.applyLocal.disabled = true;
+        state.ui.applyCard.disabled = true;
+        if (state.ui.confirmRun) {
+            state.ui.confirmRun.hidden = false;
+            state.ui.confirmRun.innerHTML =
+                '<span class="fa-solid fa-wand-magic-sparkles"></span> '
+                + `开始分析 ${picked} 个角色`;
+        }
+        return;
+    }
+
     const okJobs = state.jobs.filter(j => j.status === 'ok');
     const selected = okJobs.filter(j => j.selected && activeTags(j).length);
     const totalTags = selected.reduce((sum, j) => sum + activeTags(j).length, 0);
@@ -747,6 +999,11 @@ async function ensurePanel() {
         start: $('ct_start'),
         abort: $('ct_abort'),
         retryFailed: $('ct_retry_failed'),
+        confirmRun: $('ct_confirm_run'),
+        candidateBar: $('ct_candidate_bar'),
+        candidateText: $('ct_candidate_text'),
+        candidateReset: $('ct_candidate_reset'),
+        preview: $('ct_preview'),
         selectAll: $('ct_select_all'),
         selectNone: $('ct_select_none'),
         selectNew: $('ct_select_new'),
@@ -805,7 +1062,16 @@ async function ensurePanel() {
     });
     state.ui.scopeKeyword.addEventListener('input', refreshCount);
 
-    state.ui.start.addEventListener('click', () => runAnalysis());
+    state.ui.start.addEventListener('click', () => listCandidates());
+    state.ui.confirmRun.addEventListener('click', () => runAnalysis());
+    state.ui.candidateReset.addEventListener('click', () => {
+        state.jobs = [];
+        state.candidates = null;
+        renderRows();
+        updateFooterStats();
+        refreshCount();
+    });
+    state.ui.preview.addEventListener('click', () => listCandidates());
     state.ui.abort.addEventListener('click', () => {
         state.controller?.abort();
         toastr.info('正在停止…', 'CardTagger');
@@ -814,8 +1080,10 @@ async function ensurePanel() {
 
     const setAll = (value) => {
         state.jobs.forEach(job => {
-            if (job.status === 'ok') job.selected = value;
-            if (job._els) job._els.check.checked = value && job.status === 'ok';
+            // 候选阶段同样要能全选/全不选，几十张卡一张张点太累
+            const selectable = job.status === 'ok' || job.status === 'candidate';
+            if (selectable) job.selected = value;
+            if (job._els) job._els.check.checked = value && selectable;
         });
         updateFooterStats();
     };
@@ -1005,10 +1273,22 @@ function bindSettingsControls(host) {
                 }
                 return count;
             } catch (err) {
-                const msg = String(err?.message ?? err).slice(0, 200);
+                // 别在这里截断：诊断信息（CORS、404、401）全在句子里，
+                // 截太短就等于把答案扔了。手机上 toast 也可能被浮层挡住，
+                // 所以输入框下方的提示必须给全。
+                const msg = String(err?.message ?? err);
                 modelHint.className = 'ct-hint ct-model-hint ct-model-hint-fail';
                 modelHint.textContent = `✗ ${msg}`;
-                if (!quiet) toastr.error(`拉取模型失败：${msg}`, 'CardTagger', { timeOut: 8000 });
+                modelHint.title = msg;
+                if (!quiet) {
+                    toastr.error(
+                        `拉取模型失败：${msg}<br><br>`
+                        + '如果只是拉列表不行、模型名你本来就打得出，'
+                        + '可以直接手打，不影响正常打标签。',
+                        'CardTagger',
+                        { timeOut: 15000, escapeHtml: false },
+                    );
+                }
                 return 0;
             } finally {
                 fetchBtn.disabled = false;
