@@ -150,6 +150,10 @@
 .ct-btn-icon {
     padding: 4px 9px;
     font-size: 1rem;
+    /* 手机上按不准，给到接近 40px 的触摸目标 */
+    min-width: 38px;
+    min-height: 38px;
+    justify-content: center;
 }
 
 /* ---------- 进度 ---------- */
@@ -603,16 +607,30 @@
 }
 
 /* ---------- 小屏（手机端 ST） ---------- */
+/*
+ * 手机上 fixed + inset:0 的浮层会顶到屏幕最上沿，被系统状态栏压住，
+ * 标题栏右侧的设置/关闭按钮就按不到了。所以这里显式留出安全区：
+ *   - env(safe-area-inset-top)  ：iOS 刘海 / PWA 模式下浏览器会给真实值
+ *   - 兜底 28px                 ：安卓非 PWA 时 env() 返回 0，而安卓状态栏
+ *                                 普遍 24~32px，取 28 覆盖绝大多数情况
+ * 宁可多几像素空白，也不能让按钮落在状态栏底下。
+ */
 @media (max-width: 720px) {
     .ct-panel {
         padding: 0;
+        padding-top: max(env(safe-area-inset-top, 0px), 28px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        align-items: stretch;
+        justify-content: stretch;
+        box-sizing: border-box;
     }
 
     .ct-panel-card {
-        width: 100vw;
-        height: 100vh;
+        width: 100%;
+        height: 100%;
         border: none;
         border-radius: 0;
+        box-sizing: border-box;
     }
 
     .ct-summary {
@@ -639,6 +657,7 @@
 
     .ct-footer {
         padding: 10px 12px;
+        padding-bottom: max(10px, env(safe-area-inset-bottom, 0px));
     }
 
     .ct-footer-actions button {
@@ -656,5 +675,10 @@
 
     .ct-view-body {
         padding: 12px 12px 24px;
+    }
+
+    /* 抽屉在小屏上默认收起更合适：四组全展开会把结果区挤到看不见 */
+    .ct-view-body .inline-drawer-content {
+        padding: 8px 4px 12px;
     }
 }
