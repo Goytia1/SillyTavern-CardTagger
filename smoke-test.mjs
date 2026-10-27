@@ -3,7 +3,7 @@
  * 运行： node smoke-test.mjs
  */
 
-import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent, isShallowCharacter, findSameNameCharacters, countSameNameGroups } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent, isShallowCharacter, findSameNameCharacters, countSameNameGroups, sameNameGroups, pickNewest } from './src/extract.js';
 import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError, salvageTagsFromText, TagParseError, isEmptyTagResult, requestCardTags } from './src/api.js';
 import { parsePngCard, fetchFullCharacter } from './src/cardfile.js';
 import { assignLocalTags, findLocalTag, ensureLocalTag } from './src/writer.js';
@@ -434,6 +434,43 @@ check('同名分组计数', countSameNameGroups([{ name: '谢嬴' }, { name: '�
 check('没有同名组返回 0', countSameNameGroups([{ name: 'a' }, { name: 'b' }]) === 0);
 check('三个一组也算一组', countSameNameGroups([{ name: 'x' }, { name: 'x' }, { name: 'x' }]) === 1);
 check('空列表不炸', countSameNameGroups([]) === 0);
+
+console.log('\n=== 12d. sameNameGroups + pickNewest（只选最新版）===');
+const groupChars = [
+    { avatar: '谢嬴.png', name: '谢嬴', date_added: 1700000000000 },
+    { avatar: '谢嬴(1).png', name: '谢嬴', date_added: 1710000000000 },
+    { avatar: '谢嬴(2).png', name: '谢嬴', date_added: 1720000000000 },
+    { avatar: '姜域.png', name: '姜域', date_added: 1720000000000 },
+];
+const g1 = sameNameGroups(groupChars);
+check('只返回 ≥2 人的组', g1.length === 1 && g1[0].name === '谢嬴');
+check('组成员不丢', g1[0].members.length === 3);
+check('date_added 毫秒时间戳取最新', pickNewest(g1[0].members).avatar === '谢嬴(2).png');
+check('单成员组直接返回', pickNewest([{ avatar: 'a.png', name: 'a' }]).avatar === 'a.png');
+check('空组返回 undefined', pickNewest([]) === undefined);
+// 老 ST 用秒级时间戳，toMillis 要能归一化
+check('秒级时间戳也能正确比较', pickNewest([
+    { avatar: 'old.png', name: 'x', date_added: 1700000000 },
+    { avatar: 'new.png', name: 'x', date_added: 1710000000 },
+]).avatar === 'new.png');
+// date_added 缺失时用 create_date
+check('date_added 缺失回退 create_date', pickNewest([
+    { avatar: 'a.png', name: 'x', create_date: '2024-01-01T00:00:00Z' },
+    { avatar: 'b.png', name: 'x', create_date: '2025-06-01T00:00:00Z' },
+]).avatar === 'b.png');
+// 时间全缺时保持库内顺序的最后一个（ST 列表基本按导入序，最后≈最新）
+check('时间全缺保持库内顺序取最后一个', pickNewest([
+    { avatar: 'a.png', name: 'x' },
+    { avatar: 'b.png', name: 'x' },
+]).avatar === 'b.png');
+// job 对象（列表阶段存的 dateAdded 驼峰键）也要认
+check('job.dateAdded 驼峰键也认', pickNewest([
+    { avatar: 'a.png', name: 'x', dateAdded: 1700000000000 },
+    { avatar: 'b.png', name: 'x', dateAdded: 1710000000000 },
+]).avatar === 'b.png');
+check('character 与 job 混用同一套分组', sameNameGroups([
+    { avatar: 'a.png', name: 'x' }, { avatar: 'b.png', name: 'x' },
+]).length === 1);
 
 console.log('\n=== 13. 完整卡片拉取（/api/characters/get + 文件兜底）===');
 const realFetch2 = globalThis.fetch;
