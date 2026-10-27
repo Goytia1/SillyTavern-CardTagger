@@ -7,9 +7,11 @@
  *   会把 description / personality / scenario / first_mes / mes_example /
  *   system_prompt / post_history_instructions 全部清空，只留名字、作者、
  *   标签等列表渲染所需字段，完整卡片要另外调 `/api/characters/get` 拉。
+ *   注意 creator_notes（卡片备注）在浅层数据里是**保留**的，判断浅层时
+ *   不能把它算作内容字段（v1.3.x 就是踩了这个坑，兜底从未触发）。
  *   官方 SillyTavern 的列表接口默认返回完整数据 —— 所以同一个扩展在官方
  *   酒馆上能读到卡面内容、在 TauriTavern 上只能读到角色名，表现就是
- *   「模型交白卷」。
+ *   「模型交白卷」或「只能出一个泛泛的标签」。
  *
  * 拉取链路（两级兜底）：
  *   1. POST /api/characters/get {avatar_url} —— 官方 SillyTavern 与
@@ -25,6 +27,27 @@
 
 /** PNG 文件签名 */
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** 分块转换的块大小：避开展开传参的调用栈上限（iOS JavaScriptCore 更容易炸） */
+const CHUNK_SIZE = 0x8000; // 32K
+
+/**
+ * bytes → latin1 字符串，分块拼装。
+ * 直接 `String.fromCharCode(...bytes)` 在payload 一大（几十 KB 的卡很常见）
+ * 就会抛 RangeError: Maximum call stack size exceeded —— 且这个错发生在
+ * try/catch 外面，会把整个文件兜底链路打断。移动端 WebKit 的栈上限比桌面
+ * V8 更敏感，必须分块。
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function bytesToLatin1(bytes) {
+    let out = '';
+    for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+        const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+        out += String.fromCharCode.apply(null, chunk);
+    }
+    return out;
+}
 
 /**
  * base64 → UTF-8 字符串。
@@ -78,7 +101,7 @@ function readCardTextChunk(bytes, start, length, type) {
     if (keyword !== 'chara' && keyword !== 'ccv3') return null;
 
     // 载荷是 ASCII base64；个别工具可能直接塞 UTF-8 文本，做个兜底
-    const raw = String.fromCharCode(...bytes.subarray(pos, end));
+    const raw = bytesToLatin1(bytes.subarray(pos, end));
     let jsonText;
     try {
         jsonText = base64ToUtf8(raw);
@@ -145,12 +168,14 @@ export async function fetchFullCharacter({ avatar, getRequestHeaders }) {
     try {
         const res = await fetch('/api/characters/get', {
             method: 'POST',
-            headers,
+            headers: { ...headers, 'Content-Type': 'application/json' },
             body: JSON.stringify({ avatar_url: avatar }),
         });
         if (res.ok) {
             const data = await res.json().catch(() => null);
-            if (data && typeof data === 'object' && !data.error) {
+            // 防御「假完整」：万一客户端仍旧返回浅层对象（带 shallow 标记，
+            // 或重载荷字段全空），不能当成功，放行到文件兜底继续试
+            if (data && typeof data === 'object' && !data.error && !isStillShallow(data)) {
                 return { card: data, via: 'api' };
             }
         }
@@ -178,4 +203,28 @@ export async function fetchFullCharacter({ avatar, getRequestHeaders }) {
     }
 
     return null;
+}
+
+/**
+ * 拿到的卡片是不是「假完整」——客户端仍旧给了浅层对象。
+ * 判据跟 extract.isShallowCharacter 保持一致：显式 shallow 标记，
+ * 或重载荷内容字段全空。真·空卡也会被这里放行到文件兜底，
+ * 最终由调用方以「选中的字段在卡上是空的」收场，行为正确。
+ * @param {object} card
+ * @returns {boolean}
+ */
+function isStillShallow(card) {
+    if (!card || typeof card !== 'object') return true;
+    if (card.shallow === true) return true;
+    const HEAVY_FIELDS = [
+        'description', 'personality', 'scenario', 'first_mes', 'mes_example',
+        'system_prompt', 'post_history_instructions',
+    ];
+    const has = (obj, field) => {
+        const top = obj[field];
+        if (typeof top === 'string' && top.trim()) return true;
+        const nested = obj?.data?.[field];
+        return typeof nested === 'string' && nested.trim();
+    };
+    return !HEAVY_FIELDS.some(field => has(card, field));
 }
