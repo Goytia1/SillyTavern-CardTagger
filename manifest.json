@@ -1,0 +1,9 @@
+{
+    "display_name": "CardTagger · 角色卡批量标签",
+    "loading_order": 100,
+    "js": "index.js",
+    "css": "style.css",
+    "author": "WorkBuddy",
+    "version": "1.0.0",
+    "homePage": ""
+}
