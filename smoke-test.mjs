@@ -3,8 +3,9 @@
  * 运行： node smoke-test.mjs
  */
 
-import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent } from './src/extract.js';
 import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError, salvageTagsFromText, TagParseError, isEmptyTagResult, requestCardTags } from './src/api.js';
+import { parsePngCard, fetchFullCharacter } from './src/cardfile.js';
 import { assignLocalTags, findLocalTag, ensureLocalTag } from './src/writer.js';
 import { DEFAULT_FIELD_LIMITS, DEFAULT_SELECTED_FIELDS, DEFAULT_TAG_POOL, SYSTEM_PROMPT_TEMPLATE, USER_PROMPT_TEMPLATE } from './src/defaults.js';
 
@@ -303,6 +304,134 @@ try {
     check('网络错误重试不追加推一把', nudgeCalls.length === 2 && nudgeCalls[1].messages[1].content === 'u');
 } finally {
     globalThis.fetch = realFetch;
+}
+
+// ============================================================================
+console.log('\n=== 11. PNG 直读卡片（TauriTavern 浅层数据兜底）===');
+
+// 合成一个带正确 CRC32 的 PNG：签名 + IHDR + tEXt/iTXt + IEND
+function crc32(bytes) {
+    let table = crc32.table;
+    if (!table) {
+        table = crc32.table = [];
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+            table[n] = c >>> 0;
+        }
+    }
+    let c = 0xffffffff;
+    for (const b of bytes) c = (table[(c ^ b) & 0xff] ^ (c >>> 8)) >>> 0;
+    return (c ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+    const typeBytes = [...type].map(ch => ch.charCodeAt(0));
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, data.length, false);
+    const crc = new Uint8Array(4);
+    new DataView(crc.buffer).setUint32(0, crc32([...typeBytes, ...data]), false);
+    return new Uint8Array([...len, ...typeBytes, ...data, ...crc]);
+}
+
+function makeCardPng(card, { keyword = 'chara', itxt = false } = {}) {
+    const b64 = Buffer.from(JSON.stringify(card), 'utf-8').toString('base64');
+    const kw = [...keyword].map(ch => ch.charCodeAt(0));
+    const payload = [...b64].map(ch => ch.charCodeAt(0));
+    // tEXt: keyword \0 base64；iTXt: keyword \0 compFlag compMethod langTag\0 transKeyword\0 text
+    const data = itxt ? [...kw, 0, 0, 0, 0, 0, ...payload] : [...kw, 0, ...payload];
+    const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const ihdr = pngChunk('IHDR', [0, 0, 0, 1, 8, 2, 0, 0, 0]);
+    const text = pngChunk(itxt ? 'iTXt' : 'tEXt', data);
+    const iend = pngChunk('IEND', []);
+    return new Uint8Array([...sig, ...ihdr, ...text, ...iend]);
+}
+
+const v3Card = {
+    spec: 'chara_card_v3',
+    spec_version: '3.0',
+    data: {
+        name: '姜域',
+        description: '姜家少爷，外表冷淡内心偏执，与义妹有婚约。',
+        personality: '冷淡、占有欲强',
+        tags: ['骨科', '婚约者'],
+        character_book: { entries: [{ keys: ['姜家', '婚约'] }] },
+    },
+};
+
+const pngBytes = makeCardPng(v3Card, { keyword: 'ccv3' });
+check('ccv3 (V3) tEXt 块能解析', parsePngCard(pngBytes)?.data?.name === '姜域');
+check('中文描述 base64 解码不乱码', parsePngCard(pngBytes)?.data?.description?.includes('姜家少爷'));
+check('chara (V1/V2) 块能解析',
+    parsePngCard(makeCardPng({ spec: 'chara_card_v2', data: { name: '陆沉渊', description: '总裁' } }))?.data?.name === '陆沉渊');
+check('V1 平铺卡能解析', parsePngCard(makeCardPng({ name: '无名氏', description: '老卡' }))?.name === '无名氏');
+check('iTXt 未压缩块能解析', parsePngCard(makeCardPng(v3Card, { keyword: 'ccv3', itxt: true }))?.data?.name === '姜域');
+check('ArrayBuffer 输入也认', parsePngCard(pngBytes.buffer)?.data?.name === '姜域');
+check('非 PNG 输入返回 null', parsePngCard(new Uint8Array([1, 2, 3])) === null);
+check('空输入不炸', parsePngCard(new Uint8Array(0)) === null);
+check('null 输入不炸', parsePngCard(null) === null);
+check('截断的 PNG 不炸', parsePngCard(pngBytes.slice(0, 30)) === null);
+check('块长度越界的损坏 PNG 不炸', (() => {
+    const broken = pngBytes.slice();
+    new DataView(broken.buffer).setUint32(8, 0xffffff, false); // IHDR 长度改成天文数字
+    return parsePngCard(broken) === null;
+})());
+check('无关 keyword 的 tEXt 被忽略', parsePngCard(makeCardPng(v3Card, { keyword: 'other' })) === null);
+
+console.log('\n=== 12. 浅层数据识别（TauriTavern 列表接口只给名字）===');
+check('完整角色判定有内容', hasCardContent({ name: 'x', description: '总裁设定' }) === true);
+check('嵌套在 data 里也算', hasCardContent({ name: 'x', data: { description: '总裁设定' } }) === true);
+check('只有名字 = 浅层数据', hasCardContent({ name: '姜域', tags: ['骨科'] }) === false);
+check('只有 creator/tags = 浅层数据', hasCardContent({ name: 'x', creator: 'someone', tags: ['a'], creator_notes: '' }) === false);
+check('creator_notes 有内容也算', hasCardContent({ name: 'x', creator_notes: 'tag: 骨科' }) === true);
+check('空字符串不算', hasCardContent({ name: 'x', description: '   ' }) === false);
+check('null 不炸', hasCardContent(null) === false);
+
+console.log('\n=== 13. 完整卡片拉取（/api/characters/get + 文件兜底）===');
+const realFetch2 = globalThis.fetch;
+let routeMode = 'api';
+globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/api/characters/get')) {
+        if (routeMode !== 'api') throw new TypeError('Failed to fetch');
+        return {
+            ok: true,
+            json: async () => ({ name: '姜域', description: '完整数据', data: { name: '姜域', description: '完整数据' } }),
+        };
+    }
+    if (u.startsWith('/characters/')) {
+        if (routeMode === 'file') {
+            return { ok: true, arrayBuffer: async () => makeCardPng(v3Card, { keyword: 'ccv3' }).buffer };
+        }
+        if (routeMode === 'json') {
+            const text = JSON.stringify({ name: 'JSON卡', description: 'json 卡原文' });
+            return { ok: true, arrayBuffer: async () => new TextEncoder().encode(text).buffer };
+        }
+        return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) };
+    }
+    throw new Error(`unexpected url ${u}`);
+};
+
+try {
+    routeMode = 'api';
+    const viaApi = await fetchFullCharacter({ avatar: '姜域.png', getRequestHeaders: () => ({ 'X-CSRF-Token': 't' }) });
+    check('优先走 /api/characters/get', viaApi?.via === 'api' && viaApi?.card?.description === '完整数据');
+
+    routeMode = 'file';
+    const viaFile = await fetchFullCharacter({ avatar: '姜域.png' });
+    check('/get 失败时兜底读 PNG 文件', viaFile?.via === 'file' && viaFile?.card?.data?.name === '姜域');
+    check('PNG 兜底拿到的卡可直接抽取',
+        buildCardContent(viaFile.card, { fields: ['name', 'description'], limits: {} }).text.includes('姜家少爷'));
+
+    routeMode = 'json';
+    const viaJson = await fetchFullCharacter({ avatar: 'card.json' });
+    check('.json 卡直接读原文', viaJson?.via === 'file' && viaJson?.card?.name === 'JSON卡');
+
+    routeMode = 'fail';
+    check('两级都失败返回 null', await fetchFullCharacter({ avatar: 'x.png' }) === null);
+    check('没有 avatar 返回 null', await fetchFullCharacter({ avatar: '' }) === null);
+} finally {
+    globalThis.fetch = realFetch2;
 }
 
 console.log(`\n${'─'.repeat(46)}`);
