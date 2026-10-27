@@ -29,12 +29,16 @@
                     </select>
                     <input type="text" id="ct_scope_keyword" class="ct-select ct-keyword-input"
                         placeholder="关键字，匹配角色名与标签" hidden />
+                    <button type="button" id="ct_preview" class="ct-btn ct-btn-ghost"
+                        title="先看看这个范围会命中哪些角色，别急着开跑">
+                        <span class="fa-solid fa-magnifying-glass"></span> 预览
+                    </button>
                     <span id="ct_scope_count" class="ct-hint"></span>
                 </div>
 
                 <div class="ct-toolbar-group ct-toolbar-grow">
                     <button type="button" id="ct_start" class="ct-btn ct-btn-primary">
-                        <span class="fa-solid fa-wand-magic-sparkles"></span> 开始分析
+                        <span class="fa-solid fa-list-check"></span> 列出角色
                     </button>
                     <button type="button" id="ct_abort" class="ct-btn ct-btn-danger" hidden>
                         <span class="fa-solid fa-stop"></span> 中断
@@ -57,10 +61,15 @@
             </div>
 
             <div id="ct_result_wrap" class="ct-result-wrap">
+                <div id="ct_candidate_bar" class="ct-candidate-bar" hidden>
+                    <span class="fa-solid fa-circle-info"></span>
+                    <span id="ct_candidate_text"></span>
+                    <button type="button" id="ct_candidate_reset" class="ct-btn ct-btn-ghost ct-btn-tiny">重新选范围</button>
+                </div>
                 <div id="ct_empty_state" class="ct-empty">
                     <div class="fa-solid fa-tags ct-empty-icon"></div>
-                    <div>选好范围，点「开始分析」。</div>
-                    <div class="ct-hint">AI 只会读取你勾的那几个字段，不会看聊天记录，也不会改动任何东西 —— 直到你按下「应用」。</div>
+                    <div>选好范围，点「列出角色」。</div>
+                    <div class="ct-hint">会先把命中的角色列在这儿，你勾完确认才真正开始调 AI。</div>
                 </div>
                 <table id="ct_result_table" class="ct-table" hidden>
                     <thead>
@@ -78,6 +87,9 @@
             <div class="ct-footer">
                 <div id="ct_footer_stats" class="ct-footer-stats"></div>
                 <div class="ct-footer-actions">
+                    <button type="button" id="ct_confirm_run" class="ct-btn ct-btn-primary" hidden>
+                        <span class="fa-solid fa-wand-magic-sparkles"></span> 开始分析
+                    </button>
                     <button type="button" id="ct_apply_local" class="ct-btn ct-btn-primary" disabled>
                         <span class="fa-solid fa-check"></span> 应用到本地标签
                     </button>
@@ -146,6 +158,7 @@
                                 <div>
                                     <label for="ct_max_tokens">最大 Token</label>
                                     <input type="number" id="ct_max_tokens" class="text_pole widthUnset" min="50" step="10" />
+                                    <div class="ct-hint">别低于 300，否则 JSON 会被截断成半截，表现为「模型没给出任何标签」</div>
                                 </div>
                             </div>
 
