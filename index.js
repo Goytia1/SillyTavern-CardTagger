@@ -736,6 +736,11 @@ async function ensurePanel() {
         root: $('ct_panel'),
         close: $('ct_close_panel'),
         summary: $('ct_summary'),
+        viewMain: $('ct_view_main'),
+        viewSettings: $('ct_view_settings'),
+        openSettingsBtn: $('ct_open_settings'),
+        backMain: $('ct_back_main'),
+        finishSettings: $('ct_finish_settings'),
         scope: $('ct_scope'),
         scopeKeyword: $('ct_scope_keyword'),
         scopeCount: $('ct_scope_count'),
@@ -764,8 +769,29 @@ async function ensurePanel() {
         if (e.target === state.ui.root) state.ui.root.hidden = true;
     });
 
+    // ---- 主视图 / 设置视图 切换 ----
+    const switchView = (view) => {
+        const settings = view === 'settings';
+        state.ui.viewMain.hidden = settings;
+        state.ui.viewSettings.hidden = !settings;
+        state.ui.summary.hidden = settings;
+        state.ui.openSettingsBtn.hidden = settings;
+    };
+
+    state.ui.openSettingsBtn.addEventListener('click', () => switchView('settings'));
+    state.ui.backMain.addEventListener('click', () => switchView('main'));
+    state.ui.finishSettings.addEventListener('click', () => switchView('main'));
+    state.ui.switchView = switchView;
+    switchView('main');
+
+    // 面板内的设置控件与「扩展设置抽屉」共用同一套绑定逻辑
+    bindSettingsControls(state.ui.viewSettings);
+
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && !state.ui.root.hidden) state.ui.root.hidden = true;
+        if (e.key !== 'Escape' || state.ui.root.hidden) return;
+        // 先看是否在设置视图，是的话先退回主视图
+        if (!state.ui.viewSettings.hidden) switchView('main');
+        else state.ui.root.hidden = true;
     });
 
     const refreshCount = () => {
@@ -815,6 +841,7 @@ async function ensurePanel() {
 
 async function openPanel() {
     await ensurePanel();
+    state.ui.switchView?.('main');
     state.panelRoot.hidden = false;
     updateFooterStats();
 }
@@ -882,6 +909,21 @@ async function buildSettingsPanel() {
     host.innerHTML = html;
     root.appendChild(host);
 
+    // 抽屉里只保留一个入口，真正的设置项都搬进了主面板的「⚙ 设置」视图
+    host.querySelector('#ct_open_panel')?.addEventListener('click', () => openPanel());
+}
+
+/**
+ * 绑定设置控件。
+ *
+ * 抽出来是因为同一套控件要在两处出现：主面板内的设置视图，以及（曾经的）
+ * 扩展设置抽屉。传入宿主元素即可，内部一律用 querySelector 作用域内查找，
+ * 避免重复 id 互相干扰。
+ *
+ * @param {HTMLElement} host 包含设置表单的根元素
+ * @param {object} s 设置对象
+ */
+function bindSettingsControls(host) {
     const $ = (sel) => host.querySelector(sel);
     const s = getSettings();
 
@@ -1029,9 +1071,6 @@ async function buildSettingsPanel() {
             toggle.classList.toggle('expanded');
         });
     });
-
-    // ---- 打开主面板 ----
-    $('#ct_open_panel').addEventListener('click', () => openPanel());
 
     // 联动 ST 原生的 inline-drawer 折叠行为
     host.querySelectorAll('.inline-drawer-toggle').forEach(t => {

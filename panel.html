@@ -7,81 +7,268 @@
             </div>
             <div class="ct-panel-head-actions">
                 <span id="ct_summary" class="ct-summary"></span>
+                <button type="button" id="ct_open_settings" class="ct-btn ct-btn-icon ct-settings-btn" title="设置">
+                    <span class="fa-solid fa-gear"></span>
+                </button>
                 <button type="button" id="ct_close_panel" class="ct-btn ct-btn-icon" title="关闭">
                     <span class="fa-solid fa-xmark"></span>
                 </button>
             </div>
         </div>
 
-        <div class="ct-toolbar">
-            <div class="ct-toolbar-group">
-                <label class="ct-label-inline">范围</label>
-                <select id="ct_scope" class="ct-select">
-                    <option value="all">全部角色</option>
-                    <option value="untagged">还没打过本地标签的</option>
-                    <option value="keyword">按关键字筛选</option>
-                    <option value="filtered">当前 ST 搜索/筛选结果</option>
-                </select>
-                <input type="text" id="ct_scope_keyword" class="ct-select ct-keyword-input"
-                    placeholder="关键字，匹配角色名与标签" hidden />
-                <span id="ct_scope_count" class="ct-hint"></span>
+        <!-- ============ 主视图 ============ -->
+        <div id="ct_view_main" class="ct-view">
+            <div class="ct-toolbar">
+                <div class="ct-toolbar-group">
+                    <label class="ct-label-inline">范围</label>
+                    <select id="ct_scope" class="ct-select">
+                        <option value="all">全部角色</option>
+                        <option value="untagged">还没打过本地标签的</option>
+                        <option value="keyword">按关键字筛选</option>
+                        <option value="filtered">当前 ST 搜索/筛选结果</option>
+                    </select>
+                    <input type="text" id="ct_scope_keyword" class="ct-select ct-keyword-input"
+                        placeholder="关键字，匹配角色名与标签" hidden />
+                    <span id="ct_scope_count" class="ct-hint"></span>
+                </div>
+
+                <div class="ct-toolbar-group ct-toolbar-grow">
+                    <button type="button" id="ct_start" class="ct-btn ct-btn-primary">
+                        <span class="fa-solid fa-wand-magic-sparkles"></span> 开始分析
+                    </button>
+                    <button type="button" id="ct_abort" class="ct-btn ct-btn-danger" hidden>
+                        <span class="fa-solid fa-stop"></span> 中断
+                    </button>
+                    <button type="button" id="ct_retry_failed" class="ct-btn" hidden>
+                        <span class="fa-solid fa-rotate-right"></span> 重试失败项
+                    </button>
+                </div>
+
+                <div class="ct-toolbar-group">
+                    <button type="button" id="ct_select_all" class="ct-btn ct-btn-ghost">全选</button>
+                    <button type="button" id="ct_select_none" class="ct-btn ct-btn-ghost">全不选</button>
+                    <button type="button" id="ct_select_new" class="ct-btn ct-btn-ghost">只看新建标签</button>
+                </div>
             </div>
 
-            <div class="ct-toolbar-group ct-toolbar-grow">
-                <button type="button" id="ct_start" class="ct-btn ct-btn-primary">
-                    <span class="fa-solid fa-wand-magic-sparkles"></span> 开始分析
-                </button>
-                <button type="button" id="ct_abort" class="ct-btn ct-btn-danger" hidden>
-                    <span class="fa-solid fa-stop"></span> 中断
-                </button>
-                <button type="button" id="ct_retry_failed" class="ct-btn" hidden>
-                    <span class="fa-solid fa-rotate-right"></span> 重试失败项
-                </button>
+            <div id="ct_progress_wrap" class="ct-progress-wrap" hidden>
+                <div class="ct-progress-bar"><div id="ct_progress_fill" class="ct-progress-fill"></div></div>
+                <div id="ct_progress_text" class="ct-progress-text"></div>
             </div>
 
-            <div class="ct-toolbar-group">
-                <button type="button" id="ct_select_all" class="ct-btn ct-btn-ghost">全选</button>
-                <button type="button" id="ct_select_none" class="ct-btn ct-btn-ghost">全不选</button>
-                <button type="button" id="ct_select_new" class="ct-btn ct-btn-ghost">只看新建标签</button>
+            <div id="ct_result_wrap" class="ct-result-wrap">
+                <div id="ct_empty_state" class="ct-empty">
+                    <div class="fa-solid fa-tags ct-empty-icon"></div>
+                    <div>选好范围，点「开始分析」。</div>
+                    <div class="ct-hint">AI 只会读取你勾的那几个字段，不会看聊天记录，也不会改动任何东西 —— 直到你按下「应用」。</div>
+                </div>
+                <table id="ct_result_table" class="ct-table" hidden>
+                    <thead>
+                        <tr>
+                            <th class="ct-col-check"></th>
+                            <th class="ct-col-name">角色</th>
+                            <th class="ct-col-tags">AI 建议的标签</th>
+                            <th class="ct-col-status">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ct_result_body"></tbody>
+                </table>
+            </div>
+
+            <div class="ct-footer">
+                <div id="ct_footer_stats" class="ct-footer-stats"></div>
+                <div class="ct-footer-actions">
+                    <button type="button" id="ct_apply_local" class="ct-btn ct-btn-primary" disabled>
+                        <span class="fa-solid fa-check"></span> 应用到本地标签
+                    </button>
+                    <button type="button" id="ct_apply_card" class="ct-btn" disabled>
+                        <span class="fa-solid fa-file-import"></span> 回填卡片
+                    </button>
+                    <button type="button" id="ct_export" class="ct-btn ct-btn-ghost">
+                        <span class="fa-solid fa-download"></span> 导出结果
+                    </button>
+                </div>
             </div>
         </div>
 
-        <div id="ct_progress_wrap" class="ct-progress-wrap" hidden>
-            <div class="ct-progress-bar"><div id="ct_progress_fill" class="ct-progress-fill"></div></div>
-            <div id="ct_progress_text" class="ct-progress-text"></div>
-        </div>
-
-        <div id="ct_result_wrap" class="ct-result-wrap">
-            <div id="ct_empty_state" class="ct-empty">
-                <div class="fa-solid fa-tags ct-empty-icon"></div>
-                <div>选好范围，点「开始分析」。</div>
-                <div class="ct-hint">AI 只会读取你勾的那几个字段，不会看聊天记录，也不会改动任何东西 —— 直到你按下「应用」。</div>
+        <!-- ============ 设置视图 ============ -->
+        <div id="ct_view_settings" class="ct-view" hidden>
+            <div class="ct-settings-head">
+                <button type="button" id="ct_back_main" class="ct-btn ct-btn-ghost">
+                    <span class="fa-solid fa-arrow-left"></span> 返回
+                </button>
+                <span class="ct-settings-title">设置</span>
+                <span class="ct-saved-tip">改动即时保存</span>
             </div>
-            <table id="ct_result_table" class="ct-table" hidden>
-                <thead>
-                    <tr>
-                        <th class="ct-col-check"></th>
-                        <th class="ct-col-name">角色</th>
-                        <th class="ct-col-tags">AI 建议的标签</th>
-                        <th class="ct-col-status">状态</th>
-                    </tr>
-                </thead>
-                <tbody id="ct_result_body"></tbody>
-            </table>
-        </div>
 
-        <div class="ct-footer">
-            <div id="ct_footer_stats" class="ct-footer-stats"></div>
-            <div class="ct-footer-actions">
-                <button type="button" id="ct_apply_local" class="ct-btn ct-btn-primary" disabled>
-                    <span class="fa-solid fa-check"></span> 应用到本地标签
-                </button>
-                <button type="button" id="ct_apply_card" class="ct-btn" disabled>
-                    <span class="fa-solid fa-file-import"></span> 回填卡片
-                </button>
-                <button type="button" id="ct_export" class="ct-btn ct-btn-ghost">
-                    <span class="fa-solid fa-download"></span> 导出结果
-                </button>
+            <div class="ct-view-body">
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>AI 数据源</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+
+                        <label for="ct_ai_source_st" class="checkbox_label">
+                            <input type="radio" id="ct_ai_source_st" name="ct_ai_source" value="st" />
+                            <span>复用 SillyTavern 当前连接</span>
+                        </label>
+                        <div class="ct-hint">零配置，但只能串行跑，且会按你当前的采样参数计费。角色多时不推荐。</div>
+
+                        <label for="ct_ai_source_custom" class="checkbox_label">
+                            <input type="radio" id="ct_ai_source_custom" name="ct_ai_source" value="custom" />
+                            <span>独立配置 API（推荐）</span>
+                        </label>
+                        <div class="ct-hint">随便挑便宜的小模型，不占主连接额度，可并发批量跑。</div>
+
+                        <div class="ct-sub-block" data-source="custom">
+                            <label for="ct_api_url">API 地址</label>
+                            <input type="text" id="ct_api_url" class="text_pole" placeholder="https://api.deepseek.com/v1" autocomplete="off" />
+
+                            <label for="ct_api_key">API Key</label>
+                            <input type="password" id="ct_api_key" class="text_pole" placeholder="sk-..." autocomplete="off" />
+
+                            <label for="ct_model">模型名</label>
+                            <input type="text" id="ct_model" class="text_pole" placeholder="deepseek-chat" autocomplete="off" />
+
+                            <div class="ct-row">
+                                <div>
+                                    <label for="ct_temperature">温度</label>
+                                    <input type="number" id="ct_temperature" class="text_pole widthUnset" min="0" max="2" step="0.1" />
+                                </div>
+                                <div>
+                                    <label for="ct_max_tokens">最大 Token</label>
+                                    <input type="number" id="ct_max_tokens" class="text_pole widthUnset" min="50" step="10" />
+                                </div>
+                            </div>
+
+                            <div class="ct-collapsible">
+                                <div class="ct-collapsible-toggle fa-solid fa-circle-right"> 高级（中转/反代用）</div>
+                                <div class="ct-collapsible-content">
+                                    <label for="ct_extra_headers">额外请求头（JSON）</label>
+                                    <textarea id="ct_extra_headers" class="text_pole textarea_compact" rows="2" placeholder='{"HTTP-Referer": "https://openrouter.ai"}'></textarea>
+
+                                    <label for="ct_extra_body">额外请求体字段（JSON）</label>
+                                    <textarea id="ct_extra_body" class="text_pole textarea_compact" rows="2" placeholder='{"provider": {"order": ["deepseek"]}}'></textarea>
+                                </div>
+                            </div>
+
+                            <div class="ct-row ct-row-actions">
+                                <input type="button" id="ct_test_connection" class="menu_button" value="测试连接" />
+                                <span id="ct_test_result" class="ct-test-result"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>标签池</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <div class="ct-hint">
+                            AI 会优先从这里选词。每行一个。池子越贴合你的收藏习惯，打出来的标签越干净。
+                        </div>
+                        <textarea id="ct_tag_pool" class="text_pole ct-tag-pool" rows="10"></textarea>
+
+                        <div class="ct-row ct-row-actions">
+                            <input type="button" id="ct_import_st_tags" class="menu_button" value="导入 ST 已有标签" />
+                            <input type="button" id="ct_collect_card_tags" class="menu_button" value="从卡片内嵌标签汇总" />
+                            <input type="button" id="ct_add_nsfw" class="menu_button" value="追加成人分类词" />
+                            <input type="button" id="ct_reset_pool" class="menu_button menu_button_danger" value="恢复默认" />
+                        </div>
+                        <div id="ct_pool_meta" class="ct-hint"></div>
+
+                        <hr />
+                        <div class="ct-row">
+                            <div>
+                                <label for="ct_max_tags">每卡最多选几个</label>
+                                <input type="number" id="ct_max_tags" class="text_pole widthUnset" min="1" max="20" />
+                            </div>
+                            <div>
+                                <label for="ct_max_new_tags">最多允许新建几个</label>
+                                <input type="number" id="ct_max_new_tags" class="text_pole widthUnset" min="0" max="10" />
+                            </div>
+                        </div>
+                        <label for="ct_allow_new_tags" class="checkbox_label">
+                            <input type="checkbox" id="ct_allow_new_tags" />
+                            <span>允许 AI 新建标签（混合模式）</span>
+                        </label>
+                        <div class="ct-hint">关掉就成了纯选择题。新建的标签在结果面板里会标出来，方便你事后统一审核合并。</div>
+
+                        <label for="ct_extra_instruction">附加指令（可选）</label>
+                        <textarea id="ct_extra_instruction" class="text_pole textarea_compact" rows="3"
+                            placeholder="例如：不要使用「CEO」这个词，统一用「总裁」；涉及师生恋的一律打「师生」"></textarea>
+                    </div>
+                </div>
+
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>读卡范围</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <div class="ct-hint">
+                            决定把卡片的哪些部分喂给 AI。字段越少越省钱，太少则可能漏打。
+                            「知识库关键词」信息密度很高，建议保留。
+                        </div>
+                        <div id="ct_field_list" class="ct-field-list"></div>
+                    </div>
+                </div>
+
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b>执行与写入</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <div class="ct-row">
+                            <div>
+                                <label for="ct_concurrency">并发数</label>
+                                <input type="number" id="ct_concurrency" class="text_pole widthUnset" min="1" max="16" />
+                            </div>
+                            <div>
+                                <label for="ct_retry_times">失败重试</label>
+                                <input type="number" id="ct_retry_times" class="text_pole widthUnset" min="0" max="5" />
+                            </div>
+                        </div>
+
+                        <label for="ct_skip_tagged" class="checkbox_label">
+                            <input type="checkbox" id="ct_skip_tagged" />
+                            <span>跳过已有本地标签的角色</span>
+                        </label>
+
+                        <hr />
+                        <label for="ct_write_local" class="checkbox_label">
+                            <input type="checkbox" id="ct_write_local" />
+                            <span>写入 SillyTavern 本地标签（立即可用于筛选／虚拟文件夹）</span>
+                        </label>
+
+                        <label for="ct_write_card" class="checkbox_label">
+                            <input type="checkbox" id="ct_write_card" />
+                            <span>同时回填卡片内嵌标签 <b>（谨慎）</b></span>
+                        </label>
+                        <div class="ct-hint ct-hint-warn">
+                            回填会逐个重写 PNG 文件：速度慢，且 SillyTavern 会重新编码图片（可能按头像设置缩放）。
+                            建议先备份 characters 目录。纯 V3 格式的卡会被服务端拒绝写入，届时只是跳过、不会损坏。
+                        </div>
+
+                        <label for="ct_overwrite_card" class="checkbox_label">
+                            <input type="checkbox" id="ct_overwrite_card" />
+                            <span>回填时覆盖卡片原有标签（默认是与原标签合并）</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ct-footer">
+                <div class="ct-footer-stats">所有改动即时保存，改完可以直接关掉。</div>
+                <div class="ct-footer-actions">
+                    <button type="button" id="ct_finish_settings" class="ct-btn ct-btn-primary">
+                        <span class="fa-solid fa-check"></span> 完成
+                    </button>
+                </div>
             </div>
         </div>
     </div>
