@@ -119,7 +119,9 @@ export const DEFAULT_SETTINGS = {
     api_key: '',
     model: 'deepseek-chat',
     temperature: 0.2,
-    max_tokens: 300,
+    // 只限制输出长度。300 会把 JSON 从中间切断（尤其 reason 写得长的模型），
+    // 表现就是「模型没给出任何标签」——解析到半截 JSON 必失败。给到 800 才稳。
+    max_tokens: 800,
     /** 自定义请求头（JSON 字符串），用于中转/反代场景 */
     extra_headers: '',
     /** 自定义额外 body 字段（JSON 字符串） */
