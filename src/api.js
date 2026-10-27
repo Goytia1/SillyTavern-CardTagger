@@ -95,6 +95,29 @@ export function parseTagResult(raw) {
 }
 
 /**
+ * 判断模型返回的是不是「合法 JSON 但两个数组都空」的交白卷。
+ *
+ * 这是「模型没给出任何标签」的一大主因：模型看懂了格式、顺利返回了
+ * JSON，却一个标签都不给（太保守 / 模型太弱 / 卡面敏感被软拒）。
+ * 它跟「拒答（自然语言）」和「截断（半截 JSON）」是三种完全不同的死法，
+ * 诊断和解决办法都不一样，必须能区分开。
+ *
+ * @param {string} raw 模型原文
+ * @returns {boolean}
+ */
+export function isEmptyTagResult(raw) {
+    try {
+        const obj = JSON.parse(stripCodeFence(String(raw ?? '')));
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+        const newTags = obj.new_tags ?? obj.newTags;
+        return Array.isArray(obj.pick) && obj.pick.length === 0
+            && Array.isArray(newTags) && newTags.length === 0;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * 从模型的自然语言回复里尽量抢救出标签。
  *
  * 破限/审核被拦时模型不会答 JSON，而是回一段「抱歉，我无法…」之类的话；
@@ -235,7 +258,27 @@ async function callSillyTavernApi({ systemPrompt, userPrompt, context }) {
 }
 
 /**
+ * 模型「稳妥交白卷」时，原样重问一遍大概率还是白卷。
+ * 重试时逐次加码地把话说死：先讲道理，最后直接下达指令。
+ * {{MAX_TAGS}} 在调用时按设置替换。
+ */
+const EMPTY_RESULT_NUDGES = [
+    '\n\n⚠️ 注意：上一次你的回复没有包含任何有效标签（可能是空列表、格式不符或被截断）。'
+    + '请重新阅读上面的《待分类角色卡》：只要卡面包含任何可判断的信息（身份、关系、性格、题材等），'
+    + '就必须从《可用标签池》中选出 1-{{MAX_TAGS}} 个最贴切的标签（原样复制用字）；'
+    + '池中没有合适词条时，在 new_tags 提出 1-2 个新标签。'
+    + '只有当卡面内容确实完全无法判断时才允许空列表。再次只输出 JSON，不要任何解释。',
+    '\n\n⚠️ 最后一次机会，请直接执行：从《可用标签池》中挑出 1-{{MAX_TAGS}} 个最符合卡面内容的标签，'
+    + '输出 {"pick": ["标签1"], "new_tags": [], "reason": "一句话依据"}。'
+    + '不要返回空列表，不要解释。',
+];
+
+/**
  * 统一入口：按 ai_source 分发，带重试。
+ *
+ * 重试不是简单地把同一句话再发一遍：模型第一次交白卷（合法 JSON 但
+ * pick/new_tags 全空）时，原样重问通常还是白卷。所以第 2 次起会往
+ * 用户消息后面追加「推一把」的提示，逐次加码，把话说死。
  *
  * @param {object} params
  * @param {string} params.systemPrompt
@@ -256,14 +299,23 @@ export async function requestCardTags({
     retryTimes = 2,
 }) {
     let lastError;
+    // 只有上一次是「有回复但没给出有效标签」时才推一把；
+    // 网络错误重试不需要提示词，原样再发就行
+    let lastFailureWasEmptyTags = false;
 
     for (let attempt = 0; attempt <= retryTimes; attempt++) {
         if (signal?.aborted) throw new AbortedError();
 
+        const nudge = (attempt > 0 && lastFailureWasEmptyTags)
+            ? (EMPTY_RESULT_NUDGES[Math.min(attempt - 1, EMPTY_RESULT_NUDGES.length - 1)] ?? '')
+                .replaceAll('{{MAX_TAGS}}', String(settings.max_tags ?? 4))
+            : '';
+        const finalUser = nudge ? `${userPrompt}${nudge}` : userPrompt;
+
         try {
             const raw = settings.ai_source === 'st'
-                ? await callSillyTavernApi({ systemPrompt, userPrompt, context })
-                : await callCustomApi({ systemPrompt, userPrompt, settings, signal });
+                ? await callSillyTavernApi({ systemPrompt, userPrompt: finalUser, context })
+                : await callCustomApi({ systemPrompt, userPrompt: finalUser, settings, signal });
 
             if (signal?.aborted) throw new AbortedError();
 
@@ -271,6 +323,7 @@ export async function requestCardTags({
             // 空结果算失败，值得重试一次；但原文要一路带着，别丢
             if (!parsed.pick.length && !parsed.newTags.length && attempt < retryTimes) {
                 lastError = new TagParseError('模型未返回有效标签', raw);
+                lastFailureWasEmptyTags = true;
                 throw lastError;
             }
             return parsed;
@@ -278,6 +331,7 @@ export async function requestCardTags({
             if (err instanceof AbortedError) throw err;
             if (err?.name === 'AbortError') throw new AbortedError();
             lastError = err;
+            if (!(err instanceof TagParseError)) lastFailureWasEmptyTags = false;
 
             if (attempt < retryTimes) {
                 // 指数退避：1s、2s、4s…
