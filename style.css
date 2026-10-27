@@ -103,6 +103,14 @@
 }
 
 /* ---------- 按钮 ---------- */
+/* [hidden] 的 UA 样式是 display:none，但任何作者规则里的 display 都会盖过它，
+   于是 hidden 形同虚设 —— 表现是还没启用的按钮、已经该收起的空状态一直挂在界面上。
+   .ct-empty / .ct-btn / .ct-view-body 都带 display，全都会踩这个坑，
+   所以统一兜一道，别靠 UA 样式。 */
+[hidden] {
+    display: none !important;
+}
+
 .ct-btn {
     display: inline-flex;
     align-items: center;
@@ -294,6 +302,47 @@
 .ct-chip-existing {
     background: rgba(127, 127, 127, 0.18);
     opacity: 0.8;
+}
+
+/* 候选阶段：表格上方说明这次会处理哪些角色、怎么排除 */
+.ct-candidate-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border: 1px solid rgba(127, 127, 127, 0.3);
+    border-radius: 6px;
+    background: rgba(127, 127, 127, 0.1);
+    font-size: 0.92em;
+    line-height: 1.5;
+}
+
+.ct-candidate-bar > .fa-solid {
+    flex: none;
+    opacity: 0.7;
+}
+
+#ct_candidate_text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.ct-btn-tiny {
+    padding: 2px 8px;
+    font-size: 0.88em;
+    flex: none;
+}
+
+/* 候选行的状态列 */
+.ct-status-candidate {
+    color: #7fb4e0;
+}
+
+/* 候选行的勾选列允许点击，光标给个提示 */
+#ct_result_body input[type="checkbox"]:not(:disabled) {
+    cursor: pointer;
 }
 
 .ct-chip-remove {
@@ -598,6 +647,35 @@
 .ct-model-hint-fail {
     color: #e2807d;
     opacity: 0.95;
+    /* 诊断信息现在写得很长（CORS/网络/404 都要分开说），必须允许换行，
+       否则手机上会被压成一行看不见 */
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.5;
+    margin-top: 4px;
+    cursor: help;
+}
+
+/* 失败行里的「看原文」入口 */
+.ct-raw-link {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border: 1px solid rgba(226, 128, 125, 0.5);
+    border-radius: 4px;
+    background: transparent;
+    color: #e2807d;
+    font-size: 0.85em;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.ct-raw-link:hover {
+    background: rgba(226, 128, 125, 0.15);
+}
+
+.ct-status-failed {
+    line-height: 1.5;
 }
 
 /* datalist 的弹层不吃 ST 主题变量，深色底下不设会变成白底黑字看不清 */
