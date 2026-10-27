@@ -1153,16 +1153,25 @@ function bindSettingsControls(host) {
         });
     });
 
-    // ---- 抽屉展开/收起 ----
-    // 不要自己绑 click：ST 原生已经用 jQuery 事件委托接管了
-    //     $(document).on('click', '.inline-drawer-toggle', ...)   // script.js
-    // 动态插入的元素同样会被它命中，用的是 slideToggle()。
-    // 早先自己写的那份会在 inline style.display 上和 slideToggle 抢，
-    // 症状是「点一下能打开、再点一下收不回去」——因为 slideToggle 读到
-    // 对方刚写下的 display 值，每次都往同一个方向翻。
-    // 所以这里只做一件事：把初始状态设为展开。
-    host.querySelectorAll('.inline-drawer-content').forEach(el => {
-        el.style.display = 'block';
+    // ---- 抽屉初始状态 ----
+    // 展开/收起本身交给 ST 原生的 jQuery 委托 + slideToggle 处理，别自己绑 click
+    // （早先自己写的那份会和 slideToggle 在内联 style.display 上抢，症状是
+    //  「点一下能打开、再点收不回去」）。这里只决定初始摊开哪几组：
+    // 宽屏全展开，一眼看全配置；窄屏只展开第一组，否则四组全摊开会把
+    // 主视图的结果列表挤到屏幕外头去。
+    const isNarrow = window.matchMedia('(max-width: 720px)').matches;
+    host.querySelectorAll('.inline-drawer').forEach((drawer, i) => {
+        const content = drawer.querySelector('.inline-drawer-content');
+        const icon = drawer.querySelector('.inline-drawer-icon');
+        const open = isNarrow ? i === 0 : true;
+
+        if (content) content.style.display = open ? 'block' : 'none';
+        if (icon) {
+            icon.classList.toggle('up', open);
+            icon.classList.toggle('down', !open);
+            icon.classList.toggle('fa-circle-chevron-up', open);
+            icon.classList.toggle('fa-circle-chevron-down', !open);
+        }
     });
 }
 
