@@ -120,6 +120,29 @@ export function buildCardContent(character, options) {
 }
 
 /**
+ * 判断角色对象里有没有「卡面内容」字段。
+ *
+ * 用来识别客户端返回浅层数据的场景：TauriTavern 的列表接口只给
+ * name / creator / tags，描述性格场景全空（见 src/cardfile.js 文件头）。
+ * 检测到浅层数据时，调用方应去拉完整卡片再抽取，否则模型只能看到
+ * 角色名，必然交白卷。
+ *
+ * @param {object} character characters[] 中的一个角色对象
+ * @returns {boolean}
+ */
+export function hasCardContent(character) {
+    if (!character) return false;
+    const CONTENT_FIELDS = [
+        'description', 'personality', 'scenario', 'first_mes', 'mes_example',
+        'system_prompt', 'post_history_instructions', 'creator_notes',
+    ];
+    return CONTENT_FIELDS.some(field => {
+        const value = pickField(character, field);
+        return typeof value === 'string' && value.trim().length > 0;
+    });
+}
+
+/**
  * 角色显示名（优先卡片名，回落文件名）。
  * @param {object} character
  * @returns {string}
