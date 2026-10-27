@@ -24,6 +24,7 @@
                     <select id="ct_scope" class="ct-select">
                         <option value="all">全部角色</option>
                         <option value="untagged">还没打过本地标签的</option>
+                        <option value="same-name">有多张同名卡的</option>
                         <option value="keyword">按关键字筛选</option>
                         <option value="filtered">当前 ST 搜索/筛选结果</option>
                     </select>
@@ -52,6 +53,8 @@
                     <button type="button" id="ct_select_all" class="ct-btn ct-btn-ghost">全选</button>
                     <button type="button" id="ct_select_none" class="ct-btn ct-btn-ghost">全不选</button>
                     <button type="button" id="ct_select_new" class="ct-btn ct-btn-ghost">只看新建标签</button>
+                    <button type="button" id="ct_pick_latest" class="ct-btn ct-btn-ghost"
+                            title="每组同名卡只勾选导入最新的一张，AI 只读它；其余同名卡出结果后用「同名同步」补标签">只选最新版</button>
                 </div>
             </div>
 
