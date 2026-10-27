@@ -18,7 +18,8 @@ import {
     SYSTEM_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
-import { buildCardContent, getExistingTags, getCharacterDisplayName } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent } from './src/extract.js';
+import { fetchFullCharacter } from './src/cardfile.js';
 import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText, isEmptyTagResult } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
 
@@ -363,7 +364,24 @@ async function runAnalysis() {
         if (signal.aborted) throw new AbortedError();
 
         const character = targets[job.index];
-        const { text, isEmpty } = buildCardContent(character, {
+
+        // TauriTavern 等客户端的角色列表只返回浅层数据（描述/性格/场景全空），
+        // 直接抽只能得到角色名，模型必然交白卷。这时补拉一次完整卡片。
+        let source = character;
+        if (!hasCardContent(source)) {
+            const full = await fetchFullCharacter({
+                avatar: character?.avatar,
+                getRequestHeaders: () => (typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {}),
+            });
+            if (full?.card) {
+                source = full.card;
+                job.fullFetch = full.via; // 'api' | 'file'
+            } else {
+                job.fullFetch = 'failed';
+            }
+        }
+
+        const { text, isEmpty } = buildCardContent(source, {
             fields: s.selected_fields,
             limits: s.field_limits,
         });
@@ -478,7 +496,22 @@ async function retryFailed() {
             return;
         }
 
-        const { text } = buildCardContent(character, {
+        // 同 runAnalysis：浅层数据时补拉完整卡片
+        let source = character;
+        if (!hasCardContent(source)) {
+            const full = await fetchFullCharacter({
+                avatar: character?.avatar,
+                getRequestHeaders: () => (typeof context.getRequestHeaders === 'function' ? context.getRequestHeaders() : {}),
+            });
+            if (full?.card) {
+                source = full.card;
+                job.fullFetch = full.via;
+            } else {
+                job.fullFetch = 'failed';
+            }
+        }
+
+        const { text } = buildCardContent(source, {
             fields: s.selected_fields,
             limits: s.field_limits,
         });
@@ -573,7 +606,14 @@ function describeEmptyResult(job, err) {
         const sent = job?.sentLength
             ? `（本次发给模型的内容约 ${job.sentLength} 字符${job.sentLength < 200 ? '，明显偏少，优先去检查抽取字段' : ''}）`
             : '';
+        // 浅层数据 + 兜底拉取也失败：基本可断定是非官方客户端（如 TauriTavern）
+        // 的列表接口只给了名字，完整卡片没拿到
+        const shallowNote = job?.fullFetch === 'failed'
+            ? '客户端只返回了浅层数据（描述/性格等字段为空），完整卡片拉取也失败了 —— '
+              + '如果你用的是 TauriTavern 这类第三方客户端，检查角色文件是否还在、网络是否正常。'
+            : '';
         return `模型返回了合法 JSON，但 pick / new_tags 都是空的${sent} —— 模型看懂了格式却交白卷。`
+            + shallowNote
             + '常见原因：① 抽取到的卡面内容太少或字段没选对；② 模型太保守或太弱；③ 卡面内容敏感被软拒。'
             + '已自动用加强提示词重试仍为空。可尝试：换更强的模型、只保留「描述」字段、'
             + '或在「附加指令」里写「至少给出 1 个标签」。点「看原文」可核对发给模型的内容。';
@@ -638,9 +678,16 @@ function showRawDialog(job) {
 
     // 「模型到底看到了什么」——交白卷时这是第一现场：
     // 这里只有寥寥几行 = 抽取字段没选对/卡面是空的；内容详实 = 模型的问题
+    const sourceNote = job.fullFetch === 'api'
+        ? '（客户端只返回了浅层数据，完整卡片经 /api/characters/get 拉取）'
+        : job.fullFetch === 'file'
+            ? '（客户端只返回了浅层数据，完整卡片经 /characters/ 文件解析）'
+            : job.fullFetch === 'failed'
+                ? '（⚠️ 客户端只返回了浅层数据，完整卡片拉取也失败了——检查角色文件是否还在）'
+                : '';
     const sentBlock = job.sentPreview
         ? `<div style="opacity:.7;font-size:.9em;margin:12px 0 6px;">`
-          + `发送给模型的内容（共 ${job.sentLength ?? 0} 字符，下方为前 ${job.sentPreview.length} 字符预览）：</div>`
+          + `发送给模型的内容（共 ${job.sentLength ?? 0} 字符，下方为前 ${job.sentPreview.length} 字符预览）${sourceNote}：</div>`
           + `<pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:.85em;max-height:30vh;overflow:auto;">`
           + `${escapeHtml(job.sentPreview)}${(job.sentLength ?? 0) > job.sentPreview.length ? '\n…（其余部分未显示）' : ''}</pre>`
         : '';
