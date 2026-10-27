@@ -3,7 +3,7 @@
  * 运行： node smoke-test.mjs
  */
 
-import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent, isShallowCharacter } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent, isShallowCharacter, findSameNameCharacters, countSameNameGroups } from './src/extract.js';
 import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError, salvageTagsFromText, TagParseError, isEmptyTagResult, requestCardTags } from './src/api.js';
 import { parsePngCard, fetchFullCharacter } from './src/cardfile.js';
 import { assignLocalTags, findLocalTag, ensureLocalTag } from './src/writer.js';
@@ -411,6 +411,29 @@ check('无标记但有描述 = 完整', isShallowCharacter({ name: 'x', descript
 check('只有 creator_notes = 浅层', isShallowCharacter({ name: 'x', creator_notes: '备注' }) === true);
 check('TauriTavern 浅层形状 = 浅层', isShallowCharacter({ name: '姜域', shallow: true, tags: ['都市'], creator_notes: '备注' }) === true);
 check('null 不炸', isShallowCharacter(null) === false);
+
+console.log('\n=== 12c. 同名角色识别（同名标签同步）===');
+const sameNameCtx = {
+    characters: [
+        { avatar: '谢嬴.png', name: '谢嬴' },
+        { avatar: '谢嬴-v2.png', name: '谢嬴' },
+        { avatar: '谢嬴（另一个作者）.png', name: '谢嬴' },
+        { avatar: '姜域.png', name: '姜域' },
+        { avatar: '谢嬴.json', name: '谢嬴' },
+    ],
+};
+check('同名角色全部找出', findSameNameCharacters(sameNameCtx, '谢嬴', '谢嬴.png').length === 3);
+check('排除自己', findSameNameCharacters(sameNameCtx, '谢嬴', '谢嬴.png').every(c => c.avatar !== '谢嬴.png'));
+check('只此一个同名返回空', findSameNameCharacters(sameNameCtx, '姜域', '姜域.png').length === 0);
+check('换一个当源结果一致', findSameNameCharacters(sameNameCtx, '谢嬴', '谢嬴-v2.png').length === 3);
+check('空名字不炸', findSameNameCharacters(sameNameCtx, '', 'x.png').length === 0);
+check('没有 characters 不炸', findSameNameCharacters({}, '谢嬴', 'x.png').length === 0);
+check('浅层数据也能识别同名（只有 name 字段）',
+    findSameNameCharacters({ characters: [{ avatar: 'a.png', name: '谢嬴' }, { avatar: 'b.png', name: '谢嬴' }] }, '谢嬴', 'a.png').length === 1);
+check('同名分组计数', countSameNameGroups([{ name: '谢嬴' }, { name: '谢嬴' }, { name: '姜域' }]) === 1);
+check('没有同名组返回 0', countSameNameGroups([{ name: 'a' }, { name: 'b' }]) === 0);
+check('三个一组也算一组', countSameNameGroups([{ name: 'x' }, { name: 'x' }, { name: 'x' }]) === 1);
+check('空列表不炸', countSameNameGroups([]) === 0);
 
 console.log('\n=== 13. 完整卡片拉取（/api/characters/get + 文件兜底）===');
 const realFetch2 = globalThis.fetch;
