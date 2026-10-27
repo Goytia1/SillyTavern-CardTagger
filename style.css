@@ -699,6 +699,37 @@
     background: rgba(226, 128, 125, 0.15);
 }
 
+/* 「同名×N」同步按钮：跟看原文同款小药丸，换成主题青色系区分 */
+.ct-sync-link {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border: 1px solid rgba(152, 195, 121, 0.55);
+    border-radius: 4px;
+    background: transparent;
+    color: #98c379;
+    font-size: 0.85em;
+    cursor: pointer;
+    vertical-align: middle;
+}
+
+.ct-sync-link:hover {
+    background: rgba(152, 195, 121, 0.15);
+}
+
+/* 候选行角色名旁的「同名×N」角标 */
+.ct-same-name {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border: 1px dashed rgba(229, 192, 123, 0.6);
+    border-radius: 4px;
+    color: #e5c07b;
+    font-size: 0.78em;
+    vertical-align: middle;
+    cursor: help;
+}
+
 .ct-status-failed {
     line-height: 1.5;
 }
