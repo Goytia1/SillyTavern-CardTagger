@@ -3,7 +3,7 @@
  * 运行： node smoke-test.mjs
  */
 
-import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName, hasCardContent, isShallowCharacter } from './src/extract.js';
 import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError, salvageTagsFromText, TagParseError, isEmptyTagResult, requestCardTags } from './src/api.js';
 import { parsePngCard, fetchFullCharacter } from './src/cardfile.js';
 import { assignLocalTags, findLocalTag, ensureLocalTag } from './src/writer.js';
@@ -378,29 +378,63 @@ check('块长度越界的损坏 PNG 不炸', (() => {
 })());
 check('无关 keyword 的 tEXt 被忽略', parsePngCard(makeCardPng(v3Card, { keyword: 'other' })) === null);
 
+// 大卡回归：几十万字符的卡面很常见。旧实现用 String.fromCharCode(...bytes)
+// 展开传参，payload 一大就抛 RangeError（Maximum call stack size exceeded），
+// 且抛在 try/catch 外面，会把整个文件兜底打断。iOS WebKit 栈上限更敏感。
+const hugeDescription = '姜'.repeat(300000); // base64 后约 40 万字符
+const hugeCard = { spec: 'chara_card_v3', data: { name: '姜域', description: hugeDescription } };
+let hugeParsed = null;
+let hugeThrew = null;
+try {
+    hugeParsed = parsePngCard(makeCardPng(hugeCard, { keyword: 'ccv3' }));
+} catch (err) {
+    hugeThrew = err;
+}
+check('30 万字符大卡解析不炸（分块解码）', hugeThrew === null && hugeParsed?.data?.description === hugeDescription);
+
 console.log('\n=== 12. 浅层数据识别（TauriTavern 列表接口只给名字）===');
 check('完整角色判定有内容', hasCardContent({ name: 'x', description: '总裁设定' }) === true);
 check('嵌套在 data 里也算', hasCardContent({ name: 'x', data: { description: '总裁设定' } }) === true);
 check('只有名字 = 浅层数据', hasCardContent({ name: '姜域', tags: ['骨科'] }) === false);
 check('只有 creator/tags = 浅层数据', hasCardContent({ name: 'x', creator: 'someone', tags: ['a'], creator_notes: '' }) === false);
-check('creator_notes 有内容也算', hasCardContent({ name: 'x', creator_notes: 'tag: 骨科' }) === true);
+// v1.3.x 的回归测试：TauriTavern 的 into_shallow() 保留 creator_notes，
+// 把它算作内容会让浅层检测永远误判为「有内容」、完整卡片兜底从不触发
+check('只有 creator_notes = 浅层数据（回归：v1.3.x 误判）', hasCardContent({ name: 'x', creator_notes: 'tag: 骨科' }) === false);
+check('creator_notes + 空内容字段 = 浅层（TauriTavern 实际形状）',
+    hasCardContent({ name: '姜域', creator: 'a', tags: ['都市'], creator_notes: '备注', description: '', personality: '', scenario: '', first_mes: '', mes_example: '' }) === false);
 check('空字符串不算', hasCardContent({ name: 'x', description: '   ' }) === false);
 check('null 不炸', hasCardContent(null) === false);
+
+console.log('\n=== 12b. isShallowCharacter（显式标记 + 内容判据）===');
+check('显式 shallow 标记即浅层', isShallowCharacter({ name: 'x', shallow: true, description: '有描述但标了浅层' }) === true);
+check('无标记但有描述 = 完整', isShallowCharacter({ name: 'x', description: '总裁设定' }) === false);
+check('只有 creator_notes = 浅层', isShallowCharacter({ name: 'x', creator_notes: '备注' }) === true);
+check('TauriTavern 浅层形状 = 浅层', isShallowCharacter({ name: '姜域', shallow: true, tags: ['都市'], creator_notes: '备注' }) === true);
+check('null 不炸', isShallowCharacter(null) === false);
 
 console.log('\n=== 13. 完整卡片拉取（/api/characters/get + 文件兜底）===');
 const realFetch2 = globalThis.fetch;
 let routeMode = 'api';
-globalThis.fetch = async (url) => {
+let lastPostInit = null;
+globalThis.fetch = async (url, init) => {
     const u = String(url);
     if (u.includes('/api/characters/get')) {
+        lastPostInit = init;
         if (routeMode !== 'api') throw new TypeError('Failed to fetch');
+        // routeMode==='fake'：客户端仍旧返回浅层对象（防御「假完整」）
+        if (routeMode === 'fake') {
+            return {
+                ok: true,
+                json: async () => ({ name: '姜域', shallow: true, tags: ['都市'], creator_notes: '备注' }),
+            };
+        }
         return {
             ok: true,
             json: async () => ({ name: '姜域', description: '完整数据', data: { name: '姜域', description: '完整数据' } }),
         };
     }
     if (u.startsWith('/characters/')) {
-        if (routeMode === 'file') {
+        if (routeMode === 'file' || routeMode === 'fake') {
             return { ok: true, arrayBuffer: async () => makeCardPng(v3Card, { keyword: 'ccv3' }).buffer };
         }
         if (routeMode === 'json') {
@@ -416,6 +450,12 @@ try {
     routeMode = 'api';
     const viaApi = await fetchFullCharacter({ avatar: '姜域.png', getRequestHeaders: () => ({ 'X-CSRF-Token': 't' }) });
     check('优先走 /api/characters/get', viaApi?.via === 'api' && viaApi?.card?.description === '完整数据');
+    check('POST 带 Content-Type: application/json',
+        lastPostInit?.headers?.['Content-Type'] === 'application/json' && lastPostInit?.method === 'POST');
+
+    routeMode = 'fake';
+    const viaFake = await fetchFullCharacter({ avatar: '姜域.png' });
+    check('/get 返回浅层对象时不收下，继续走文件兜底', viaFake?.via === 'file' && viaFake?.card?.data?.name === '姜域');
 
     routeMode = 'file';
     const viaFile = await fetchFullCharacter({ avatar: '姜域.png' });
