@@ -18,7 +18,7 @@ import {
     SYSTEM_PROMPT_TEMPLATE,
     USER_PROMPT_TEMPLATE,
 } from './src/defaults.js';
-import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent, isShallowCharacter, findSameNameCharacters, countSameNameGroups } from './src/extract.js';
+import { buildCardContent, getExistingTags, getCharacterDisplayName, hasCardContent, isShallowCharacter, findSameNameCharacters, countSameNameGroups, sameNameGroups, pickNewest } from './src/extract.js';
 import { fetchFullCharacter } from './src/cardfile.js';
 import { requestCardTags, runPool, AbortedError, normalizeResult, fetchModelList, salvageTagsFromText, isEmptyTagResult } from './src/api.js';
 import { assignLocalTags, persistLocalTags, writeCardTagsBulk } from './src/writer.js';
@@ -175,6 +175,15 @@ function resolveTargets() {
             });
             break;
         }
+        case 'same-name': {
+            // 只列出「有多张同名卡」的角色：同名卡内容大同小异，
+            // 每张都让 AI 读一遍纯属浪费 token——分析最新的一张，
+            // 标签用「同名同步」带给其余即可
+            const groups = sameNameGroups(all);
+            targets = groups.flatMap(g => g.members);
+            if (!targets.length) note = '没有发现同名多卡';
+            break;
+        }
         case 'filtered': {
             const visible = readVisibleAvatars();
             if (visible === null) {
@@ -266,28 +275,44 @@ async function listCandidates() {
 
     const s = getSettings();
     const skippedTagged = s.skip_tagged && state.ui.scope.value !== 'untagged';
+    const scope = state.ui.scope.value;
 
     // 同名角色数在列表阶段就算好：候选行显示「同名×N」角标，
     // 用户能直接看出「这几张是一样的，只分析一个就行」
     const sameNameOf = (name, avatar) => findSameNameCharacters(context, name, avatar).length;
 
-    state.jobs = targets.map((character, index) => ({
-        index,
-        avatar: String(character.avatar ?? ''),
-        name: getCharacterDisplayName(character),
-        existingTags: getExistingTags(character),
-        cardTags: [...getExistingTags(character)],
-        sameNameCount: sameNameOf(getCharacterDisplayName(character), String(character.avatar ?? '')),
-        status: 'candidate',
-        pick: [],
-        newTags: [],
-        removedTags: new Set(),
-        reason: '',
-        selected: true,
-        error: '',
-        raw: '',
-        salvaged: false,
-    }));
+    // 每组同名里按 date_added（导入时间）挑出最新的一张。
+    // 「有多张同名卡的」范围下直接默认只勾它——这正是用户要的
+    const newestAvatars = new Set(
+        sameNameGroups(targets)
+            .map(g => String(pickNewest(g.members)?.avatar ?? ''))
+            .filter(Boolean),
+    );
+
+    state.jobs = targets.map((character, index) => {
+        const avatar = String(character.avatar ?? '');
+        const isNewest = newestAvatars.has(avatar);
+        return {
+            index,
+            avatar,
+            name: getCharacterDisplayName(character),
+            existingTags: getExistingTags(character),
+            cardTags: [...getExistingTags(character)],
+            dateAdded: character.date_added ?? 0,
+            createDate: character.create_date ?? '',
+            sameNameCount: sameNameOf(getCharacterDisplayName(character), avatar),
+            isNewest,
+            status: 'candidate',
+            pick: [],
+            newTags: [],
+            removedTags: new Set(),
+            reason: '',
+            selected: scope === 'same-name' ? isNewest : true,
+            error: '',
+            raw: '',
+            salvaged: false,
+        };
+    });
 
     state.candidates = { count: targets.length, skippedTagged, note: note ?? '' };
     renderRows();
@@ -297,6 +322,9 @@ async function listCandidates() {
     const parts = [`命中 ${targets.length} 个角色`];
     if (skippedTagged) parts.push('已自动跳过有本地标签的');
     if (note) parts.push(note);
+    if (scope === 'same-name') {
+        parts.push('已默认只勾选各组最新的一张（按导入时间），其余出结果后用「同名同步」补标签');
+    }
     state.ui.candidateText.textContent = `${parts.join(' · ')}。取消勾选可排除单个角色，确认后点右下角「开始分析」。`;
     state.ui.candidateBar.hidden = false;
     state.ui.confirmRun.hidden = false;
@@ -748,6 +776,25 @@ function buildRow(job) {
 
     // 角色名 + 已有标签
     const tdName = document.createElement('td');
+    tdName.appendChild(buildNameCell(job));
+    tr.appendChild(tdName);
+
+    // 标签 chips
+    const tdTags = document.createElement('td');
+    tdTags.className = 'ct-tags-cell';
+    tdTags.appendChild(buildChips(job, tdTags));
+    tr.appendChild(tdTags);
+
+    // 状态
+    const tdStatus = document.createElement('td');
+    tdStatus.appendChild(buildStatus(job));
+    tr.appendChild(tdStatus);
+
+    job._els = { tr, check, tdName, tdTags, tdStatus };
+    return tr;
+}
+
+function buildNameCell(job) {
     const wrap = document.createElement('div');
     wrap.className = 'ct-name-cell';
     const nameEl = document.createElement('div');
@@ -770,22 +817,16 @@ function buildRow(job) {
         badge.title = `还有 ${job.sameNameCount} 个同名角色 —— 只需分析其中一个，其余可在出结果后一键同步标签`;
         wrap.appendChild(badge);
     }
-    tdName.appendChild(wrap);
-    tr.appendChild(tdName);
-
-    // 标签 chips
-    const tdTags = document.createElement('td');
-    tdTags.className = 'ct-tags-cell';
-    tdTags.appendChild(buildChips(job, tdTags));
-    tr.appendChild(tdTags);
-
-    // 状态
-    const tdStatus = document.createElement('td');
-    tdStatus.appendChild(buildStatus(job));
-    tr.appendChild(tdStatus);
-
-    job._els = { tr, check, tdTags, tdStatus };
-    return tr;
+    // 「最新」标记：同组里导入最晚的那张（date_added），
+    // 用户一般只想给它打标签，其余用同步
+    if (job.isNewest) {
+        const latest = document.createElement('span');
+        latest.className = 'ct-latest-badge';
+        latest.textContent = '最新';
+        latest.title = '同名卡里导入最新的一张（按导入时间 date_added 判定）';
+        wrap.appendChild(latest);
+    }
+    return wrap;
 }
 
 function buildChips(job, container) {
@@ -974,11 +1015,15 @@ function buildStatus(job) {
 function refreshRow(job) {
     if (!job._els) { renderRows(); return; }
 
-    const { tr, check, tdTags, tdStatus } = job._els;
+    const { tr, check, tdName, tdTags, tdStatus } = job._els;
     tr.classList.toggle('ct-row-failed', job.status === 'failed');
     // 候选阶段也要能勾/能取消，这是用户排除单个角色的唯一入口
     check.disabled = !(job.status === 'ok' || job.status === 'candidate') || state.running;
     check.checked = job.selected && (job.status === 'ok' || job.status === 'candidate');
+
+    // 名字列也重绘：「同名×N」「最新」角标要跟着勾选变化更新
+    tdName.innerHTML = '';
+    tdName.appendChild(buildNameCell(job));
 
     tdTags.innerHTML = '';
     tdTags.appendChild(buildChips(job, tdTags));
@@ -1127,6 +1172,43 @@ async function applyCard() {
 // ============================================================================
 // 同名角色标签同步
 // ============================================================================
+
+/**
+ * 「只选最新版」：每组同名卡只勾选导入最新（date_added 最大）的那张，
+ * 其余取消勾选——AI 只读最新的，标签事后再用「同名同步」带给旧版。
+ *
+ * 不在同名组里的角色保持原样（用户可能列的是混合范围）。
+ */
+function pickLatestVersions() {
+    if (state.running) return;
+
+    const selectable = state.jobs.filter(j => j.status === 'candidate' || j.status === 'ok');
+    const groups = sameNameGroups(selectable);
+    if (!groups.length) {
+        toastr.info('当前列表里没有同名多卡', 'CardTagger');
+        return;
+    }
+
+    let picked = 0;
+    for (const g of groups) {
+        const newest = pickNewest(g.members);
+        for (const job of g.members) {
+            const isNewest = job === newest;
+            job.selected = isNewest;
+            job.isNewest = isNewest;
+            // 整行重绘：勾选框、「最新」角标一起跟上
+            refreshRow(job);
+            if (isNewest) picked++;
+        }
+    }
+
+    updateFooterStats();
+    toastr.success(
+        `已只选 ${groups.length} 组同名里的最新版（共 ${picked} 个角色）；`
+        + '其余同名卡出结果后用「同名同步」补标签',
+        'CardTagger',
+    );
+}
 
 /**
  * 把某个角色的标签同步给其他同名角色（核心执行，调用方负责确认）。
@@ -1319,6 +1401,7 @@ async function ensurePanel() {
         selectAll: $('ct_select_all'),
         selectNone: $('ct_select_none'),
         selectNew: $('ct_select_new'),
+        pickLatest: $('ct_pick_latest'),
         progressWrap: $('ct_progress_wrap'),
         progressFill: $('ct_progress_fill'),
         progressText: $('ct_progress_text'),
@@ -1425,6 +1508,7 @@ async function ensurePanel() {
         });
         updateFooterStats();
     });
+    state.ui.pickLatest?.addEventListener('click', () => pickLatestVersions());
 
     state.ui.applyLocal.addEventListener('click', () => applyLocal());
     state.ui.applyCard.addEventListener('click', () => applyCard());
