@@ -4,9 +4,9 @@
  */
 
 import { buildCardContent, getExistingTags, getCharacterBookKeys, getCharacterDisplayName } from './src/extract.js';
-import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError } from './src/api.js';
+import { parseTagResult, stripCodeFence, normalizeResult, parseModelList, AbortedError, salvageTagsFromText, TagParseError, isEmptyTagResult, requestCardTags } from './src/api.js';
 import { assignLocalTags, findLocalTag, ensureLocalTag } from './src/writer.js';
-import { DEFAULT_FIELD_LIMITS, DEFAULT_SELECTED_FIELDS, DEFAULT_TAG_POOL } from './src/defaults.js';
+import { DEFAULT_FIELD_LIMITS, DEFAULT_SELECTED_FIELDS, DEFAULT_TAG_POOL, SYSTEM_PROMPT_TEMPLATE, USER_PROMPT_TEMPLATE } from './src/defaults.js';
 
 let pass = 0, fail = 0;
 function check(name, cond, extra = '') {
@@ -166,6 +166,144 @@ check('sort_order 不会被覆盖回 0', fakeContext.tags.every(t => t.sort_orde
 check('findLocalTag 命中', findLocalTag(fakeContext, '总裁')?.name === '总裁');
 check('findLocalTag 未命中返回 undefined', findLocalTag(fakeContext, '不存在的词') === undefined);
 check('ensureLocalTag 幂等', ensureLocalTag(fakeContext, '总裁').id === findLocalTag(fakeContext, '总裁').id);
+
+// ============================================================================
+console.log('\n=== 7. 模型拒答 / 原文抢救（手机上「模型没给出任何标签」的主因）===');
+
+// 典型死法一：审核拦截，模型回一段自然语言
+const refusalText = '抱歉，我无法按照这个角色设定生成内容。该请求可能包含不适宜的内容。';
+check('拒答时 pick 为空', parseTagResult(refusalText).pick.length === 0);
+check('拒答时原文必须保留', parseTagResult(refusalText).raw === refusalText);
+check('拒答时 newTags 为空', parseTagResult(refusalText).newTags.length === 0);
+
+// 典型死法二：max_tokens 截断，JSON 只写一半
+const truncated = '{"pick":["总裁","骨科"],"newTags":[],"reason":"这是一位掌控集团';
+const t = parseTagResult(truncated);
+check('半截 JSON 解析不出标签', t.pick.length === 0);
+check('半截 JSON 原文仍保留', t.raw === truncated);
+
+// 典型死法三：模型把标签写进散文里（没按格式答）
+const prose = '这个角色给我的印象是：总裁，带点骨科设定，还有青梅竹马的元素，性格偏傲娇。';
+const pool = ['总裁', '骨科', '青梅竹马', '傲娇', '学生'];
+check('散文里能抢救出词表标签',
+    salvageTagsFromText(prose, pool).join() === '总裁,骨科,青梅竹马,傲娇');
+check('抢救时空原文不炸', salvageTagsFromText('', pool).length === 0);
+check('抢救时空词表不炸', salvageTagsFromText(prose, []).length === 0);
+check('抢救不会重复命中', salvageTagsFromText('总裁总裁总裁', pool).length === 1);
+check('单字标签不参与抢救（误命中率太高）',
+    salvageTagsFromText('这个故事里有王，还有总裁', ['王', '总裁']).join() === '总裁');
+check('拒答文本也可能顺带捞到词', salvageTagsFromText(refusalText, pool).length === 0);
+
+// TagParseError 要带着原文，UI 才能「看原文」
+const tpe = new TagParseError('模型未返回有效标签', refusalText);
+check('TagParseError 带原文', tpe.raw === refusalText && tpe.name === 'TagParseError');
+check('TagParseError 是 Error', tpe instanceof Error);
+
+console.log('\n=== 8. 交白卷识别（合法 JSON 但两个数组都空）===');
+// 典型死法四：模型看懂了格式，却一个标签都不给
+const blankSheet = '{"pick": [], "new_tags": []}';
+check('空数组 JSON 判定为交白卷', isEmptyTagResult(blankSheet) === true);
+check('交白卷时 pick 为空', parseTagResult(blankSheet).pick.length === 0);
+check('交白卷时原文保留', parseTagResult(blankSheet).raw === blankSheet);
+check('带围栏的空数组也认', isEmptyTagResult('```json\n{"pick":[],"new_tags":[]}\n```') === true);
+check('驼峰 newTags 空数组也认', isEmptyTagResult('{"pick":[],"newTags":[]}') === true);
+check('有 pick 不算交白卷', isEmptyTagResult('{"pick":["总裁"]}') === false);
+check('只有 new_tags 不算交白卷', isEmptyTagResult('{"pick":[],"new_tags":["新词"]}') === false);
+check('缺 pick 字段不算交白卷', isEmptyTagResult('{"new_tags":[]}') === false);
+check('拒答文本不算交白卷', isEmptyTagResult(refusalText) === false);
+check('半截 JSON 不算交白卷', isEmptyTagResult(truncated) === false);
+check('空字符串不炸', isEmptyTagResult('') === false);
+check('null 不炸', isEmptyTagResult(null) === false);
+
+console.log('\n=== 9. 提示词强化（防交白卷）===');
+check('系统提示词要求至少 1 个标签', /至少给出 1 个标签/.test(SYSTEM_PROMPT_TEMPLATE));
+check('系统提示词明确禁止空列表', /禁止返回空的标签列表/.test(SYSTEM_PROMPT_TEMPLATE));
+check('系统提示词带输出示例', SYSTEM_PROMPT_TEMPLATE.includes('{"pick"'));
+check('用户提示词带输出示例', USER_PROMPT_TEMPLATE.includes('{"pick"'));
+check('成人向题材仍要求正常打标', /正常打标签即可，不要回避/.test(SYSTEM_PROMPT_TEMPLATE));
+
+console.log('\n=== 10. 空结果重试会「推一把」（打桩 fetch）===');
+const nudgeCalls = [];
+const realFetch = globalThis.fetch;
+const BLANK = '{"pick": [], "new_tags": []}';
+const TAGS = '{"pick":["总裁"],"new_tags":[],"reason":"集团总裁设定"}';
+const DOCTOR = '{"pick":["医生"],"new_tags":[],"reason":"x"}';
+// 0 = 先交白卷、再给标签；1 = 一直交白卷；2 = 先网络错误、再给标签
+let stubRound = 0;
+let netAttempts = 0;
+globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    nudgeCalls.push(body);
+    let content;
+    if (stubRound === 0) {
+        content = nudgeCalls.length === 1 ? BLANK : TAGS;
+    } else if (stubRound === 1) {
+        content = BLANK;
+    } else {
+        netAttempts++;
+        if (netAttempts === 1) throw new TypeError('Failed to fetch');
+        content = DOCTOR;
+    }
+    return { ok: true, json: async () => ({ choices: [{ message: { content } }] }) };
+};
+
+const nudgeSettings = {
+    ai_source: 'custom',
+    api_url: 'https://example.com/v1',
+    api_key: 'k',
+    model: 'm',
+    temperature: 0,
+    max_tokens: 800,
+    max_tags: 4,
+    tag_pool: ['总裁'],
+};
+
+try {
+    const nudged = await requestCardTags({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        settings: nudgeSettings,
+        context: {},
+        retryTimes: 2,
+    });
+    check('白卷后重试拿到标签', nudged.pick.join() === '总裁');
+    check('第一次原样发送', nudgeCalls[0].messages[1].content === 'u');
+    check('重试时用户消息追加了推一把提示', nudgeCalls.length === 2 && nudgeCalls[1].messages[1].content.includes('上一次'));
+    check('推一把提示带上了 max_tags', nudgeCalls[1].messages[1].content.includes('1-4'));
+    check('重试时系统提示不变', nudgeCalls[1].messages[0].content === 's');
+
+    // 一直交白卷：重试耗尽后返回空结果（由 UI 层标记失败），且每次都推一把
+    nudgeCalls.length = 0;
+    stubRound = 1;
+    const exhausted = await requestCardTags({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        settings: nudgeSettings,
+        context: {},
+        retryTimes: 2,
+    });
+    check('重试耗尽返回空结果而不抛错', exhausted.pick.length === 0 && exhausted.newTags.length === 0);
+    check('空结果仍带原文', exhausted.raw.includes('pick'));
+    check('三次请求（1 + 2 次重试）', nudgeCalls.length === 3);
+    check('第 2、3 次都追加了推一把', nudgeCalls[1].messages[1].content.includes('⚠️') && nudgeCalls[2].messages[1].content.includes('⚠️'));
+    check('推一把逐次加码（第二次措辞不同）', nudgeCalls[1].messages[1].content !== nudgeCalls[2].messages[1].content);
+
+    // 网络错误重试不推一把：原样再发
+    nudgeCalls.length = 0;
+    netAttempts = 0;
+    stubRound = 2;
+    const afterNet = await requestCardTags({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        settings: nudgeSettings,
+        context: {},
+        retryTimes: 2,
+    });
+    check('网络错误恢复后拿到标签', afterNet.pick.join() === '医生');
+    check('网络错误重试不追加推一把', nudgeCalls.length === 2 && nudgeCalls[1].messages[1].content === 'u');
+} finally {
+    globalThis.fetch = realFetch;
+}
 
 console.log(`\n${'─'.repeat(46)}`);
 console.log(fail === 0 ? `全部通过：${pass} 项` : `通过 ${pass} 项，失败 ${fail} 项`);
